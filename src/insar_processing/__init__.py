@@ -8,7 +8,7 @@ This subpackage contains:
 - Dataset preparation utilities for training learning-based models.
 """
 
-from . import io  # noqa: F401
-from . import baseline  # noqa: F401
-from . import dataset_preparation  # noqa: F401
+# Submodules are imported lazily to avoid hard dependencies at package load time.
+# Import them explicitly when needed, e.g.:
+#   from src.insar_processing import io, baseline, pair_graph
 
