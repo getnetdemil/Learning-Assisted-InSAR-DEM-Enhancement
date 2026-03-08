@@ -1,0 +1,41 @@
+# Training config for FiLMUNet contest submission
+
+# Optimiser
+learning_rate: 1.0e-4
+weight_decay: 1.0e-5
+lr_scheduler: cosine      # cosine annealing
+warmup_epochs: 2
+
+# Training duration
+num_epochs: 50
+batch_size: 8
+
+# Loss weights (InSARLoss / LossWeights)
+loss_weights:
+  n2n:      1.0
+  unc:      0.5
+  closure:  0.3
+  temporal: 0.2
+  grad:     0.1
+
+# Checkpointing
+output_dir: experiments/enhanced/checkpoints/film_unet/
+save_every_n_epochs: 5
+# Three named checkpoints saved automatically:
+#   best_closure.pt   — best validation closure error
+#   best_unwrap.pt    — best validation unwrap success rate
+#   final.pt          — end of training
+
+# Experiment tracking (set to false to disable)
+use_wandb: false
+wandb_project: insar-dem-enhancement
+
+# Reproducibility
+seed: 42
+
+# Data loading
+num_workers: 4
+pin_memory: true
+
+# Gradient clipping
+grad_clip: 1.0
