@@ -1,0 +1,30 @@
+# Data config for FiLMUNet training — Capella AOI-based splits
+# Paths are relative to the repo root (or absolute).
+
+# Directory containing preprocessed pair outputs from scripts/preprocess_pairs.py
+pairs_dir: data/processed/pairs/
+
+# Pair manifest (output of pair_graph.py)
+pairs_manifest: data/manifests/hawaii_pairs.parquet
+
+# Triplet manifest (for closure loss)
+triplets_manifest: data/manifests/hawaii_triplets_strict.parquet
+
+# AOI splits — geographic, prevents leakage
+# Hawaii (AOI_000) is used for all splits; split by orbit/date range
+aoi_train: [AOI_000]
+aoi_val:   [AOI_000]
+aoi_test:  [AOI_000]
+# Within AOI_000: train on first 70% by date, val next 15%, test last 15%
+temporal_split:
+  train_frac: 0.70
+  val_frac:   0.15
+  # test_frac: 0.15 (remainder)
+
+# Tile settings
+tile_size: 256
+stride: 128          # 50% overlap during training
+min_coherence: 0.15  # discard tiles with mean coherence below this
+
+# Input channels: 2 (Re, Im) or 3 (Re, Im, coherence)
+in_channels: 3
