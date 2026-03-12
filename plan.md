@@ -2,7 +2,7 @@
 
 **Submission deadline: April 06, 2026 (23:59 AoE)**
 **Paper deadline: April 20 (internal) / April 28 (final)**
-**Today: March 05, 2026 — 32 days to submission**
+**Today: March 12, 2026 — 25 days to submission**
 
 ---
 
@@ -458,11 +458,12 @@ python experiments/enhanced/train_film_unet.py \
 ```
 
 **Deliverables Phase 3:**
-- [ ] `src/models/film_unet.py` — FiLM-conditioned U-Net
-- [ ] `src/losses/physics_losses.py` — all 4 loss components
-- [ ] `src/insar_processing/sublook.py` — sub-look splitting for N2N
-- [ ] `experiments/enhanced/train_film_unet.py` — training script
-- [ ] Trained model checkpoint + config logged
+- [x] `src/models/film_unet.py` — FiLM-conditioned U-Net (7.96M params, smoke-tested)
+- [x] `src/losses/physics_losses.py` — all 5 loss components (N2N, NLL, closure, temporal, grad)
+- [x] `src/losses/__init__.py` — package init
+- [x] `src/insar_processing/sublook.py` — sub-look splitting for N2N
+- [x] `experiments/enhanced/train_film_unet.py` — training script with AOI-based splits
+- [ ] Trained model checkpoint + config logged  ← **NEXT**
 - [ ] First DL-vs-baseline closure metric comparison
 
 ---
@@ -591,23 +592,21 @@ key_packages:
 | `src/models/unet_baseline.py` | Basic U-Net | Replace/extend with FiLM-conditioned U-Net |
 | `src/evaluation/dem_metrics.py` | RMSE/MAE/bias | Add all 5 contest metrics |
 | New: `src/insar_processing/pair_graph.py` | Does not exist | Build from scratch |
-| New: `src/models/film_unet.py` | Does not exist | Build from scratch |
-| New: `src/losses/physics_losses.py` | Does not exist | Build from scratch |
+| New: `src/models/film_unet.py` | **Done** (dev branch) | ✓ |
+| New: `src/losses/physics_losses.py` | **Done** (dev branch) | ✓ |
 | New: `src/evaluation/closure_metrics.py` | Does not exist | Build from scratch |
 | New: `scripts/download_subset.py` | Does not exist | Build from scratch |
 
-### 11.4 Immediate Next Steps (Mar 05–10)
+### 11.4 Immediate Next Steps (Mar 12–18)
 
-1. [ ] Install `capella-reader`, `isce3`, `pystac`, `boto3`
-2. [ ] Validate S3 access: `aws s3 ls --no-sign-request s3://capella-open-data/data/`
-3. [ ] Crawl STAC and build metadata parquet
-4. [ ] Inspect AOI/mode distribution, select 3–6 AOIs
-5. [ ] Download first small subset (1–2 AOIs, 40–80 collects)
-6. [ ] Implement `src/insar_processing/pair_graph.py` — graph + Q_ij scoring
-7. [ ] Create `notebooks/01_pair_graph_exploration.ipynb`
+1. [ ] Run `scripts/preprocess_pairs.py` on top-100 Hawaii pairs → generate training tiles
+2. [ ] Launch `train_film_unet.py` on GPU — first training run
+3. [ ] `scripts/unwrap_snaphu.py` — SNAPHU unwrapping with coherence mask
+4. [ ] `src/evaluation/closure_metrics.py` — all 5 contest metrics
+5. [ ] Compute baseline metrics (pre-DL) on Hawaii pairs → numbers to beat
 
 ---
 
-*Document Version: 2.0*
-*Last Updated: 2026-03-05*
-*Project Status: ACTIVE — Contest submission in 32 days*
+*Document Version: 2.1*
+*Last Updated: 2026-03-12*
+*Project Status: ACTIVE — Phase 3 DL pipeline complete; training run next. 25 days to submission.*
