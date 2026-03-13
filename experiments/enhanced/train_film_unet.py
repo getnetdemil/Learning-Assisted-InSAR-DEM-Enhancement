@@ -150,10 +150,10 @@ class InSARTileDataset(Dataset):
         try:
             with open(meta_path) as f:
                 m = json.load(f)
-            dt = float(m.get("delta_days", 30.0))
-            inc = float(m.get("incidence_angle_deg", 45.0))
+            dt = float(m.get("dt_days", 30.0))          # key from preprocess_pairs.py
+            inc = float(m.get("incidence_angle_deg", 45.0))  # not in coreg_meta; use default
             graze = 90.0 - inc
-            bperp = float(m.get("b_perp_m", 500.0))
+            bperp = float(m.get("bperp_m", 500.0))      # key from preprocess_pairs.py
             mode = 1.0 if str(m.get("mode", "")).upper() == "SL" else 0.0
             look = 1.0 if str(m.get("look_direction", "")).upper() == "RIGHT" else 0.0
             snr = float(m.get("snr_proxy", 0.5))
