@@ -358,7 +358,7 @@ def process_pair(
 
     # --- Save ---
     pair_id = f"{id_ref}__{id_sec}"
-    pair_dir = out_dir / pair_id[:80]  # truncate for filesystem limits
+    pair_dir = out_dir / pair_id  # full ID (104 chars max, well under 255 limit)
     pair_dir.mkdir(parents=True, exist_ok=True)
 
     save_complex_tif(ifg_raw.astype(np.complex64), pair_dir / "ifg_raw.tif")
