@@ -20,6 +20,7 @@ Step 1  scripts/download_subset.py            Build SLC manifest + download raw 
 Step 2  src/insar_processing/pair_graph.py    Build pair graph + compute B_perp (Python API)
 Step 3  scripts/preprocess_pairs.py           Coregistration → interferogram → Goldstein filter
 Step 4  scripts/select_triplet_completing_pairs.py   Find pairs needed to close triplets
+Step 4b scripts/patch_coreg_meta.py           Add FiLM metadata fields to coreg_meta.json
 Step 5  scripts/unwrap_snaphu.py              Phase unwrapping with SNAPHU
 Step 6  experiments/enhanced/train_film_unet.py      Train FiLMUNet (self-supervised)
 Step 7  eval/compute_metrics.py               All 5 contest metrics vs baseline
@@ -209,7 +210,7 @@ py scripts/preprocess_pairs.py \
 | `ifg_raw.tif` | 2-band float32 GeoTIFF | Re, Im of unnormalised interferogram |
 | `ifg_goldstein.tif` | 2-band float32 GeoTIFF | Goldstein-filtered Re, Im |
 | `coherence.tif` | 1-band float32 GeoTIFF | Coherence values ∈ [0,1] |
-| `coreg_meta.json` | JSON | `id_ref`, `id_sec`, `dt_days`, `dinc_deg`, `q_score`, `bperp_m`, `row_offset_px`, `col_offset_px`, `patch_size`, `patch_row_ref`, `patch_col_ref` |
+| `coreg_meta.json` | JSON | `id_ref`, `id_sec`, `dt_days`, `dinc_deg`, `q_score`, `bperp_m`, `row_offset_px`, `col_offset_px`, `patch_size`, `patch_row_ref`, `patch_col_ref`, `incidence_angle_deg`, `mode`, `look_direction`, `snr_proxy` (last 4 added by Step 4b) |
 
 **Performance**: ~17 min for 62 pairs with 4 workers on a 4096×4096 patch size.
 
@@ -272,6 +273,46 @@ Saved 62 rows → data/manifests/triplet_completing_pairs.parquet
 
 ---
 
+## Step 4b — Patch FiLM Metadata into coreg_meta.json
+
+**Script**: `scripts/patch_coreg_meta.py`
+
+**Purpose**: The preprocessing step (Step 3) saves `coreg_meta.json` with core geometry fields, but omits four fields required for proper FiLM conditioning: `incidence_angle_deg`, `mode`, `look_direction`, and `snr_proxy`. This script reads the missing fields from `hawaii_pairs.parquet` and writes them into each pair's `coreg_meta.json` in-place.
+
+Run this once after all preprocessing is complete, before training or evaluation.
+
+```bash
+# Patch all 224 coreg_meta.json files:
+py scripts/patch_coreg_meta.py \
+    --pairs_dir data/processed/pairs \
+    --manifest  data/manifests/hawaii_pairs.parquet
+```
+
+**All flags**:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--pairs_dir` | required | Root directory containing per-pair subdirectories |
+| `--manifest` | required | `hawaii_pairs.parquet` (source of incidence/look/q_score) |
+
+**Expected output**:
+```
+Patched 224 / 224 coreg_meta.json files (0 not in manifest)
+```
+
+**Fields added to each** `coreg_meta.json`:
+
+| Field | Source | Example |
+|-------|--------|---------|
+| `incidence_angle_deg` | mean of `incidence_ref` + `incidence_sec` | `55.8` |
+| `mode` | hardcoded `"SL"` (all Capella Spotlight) | `"SL"` |
+| `look_direction` | `look_direction` column from manifest | `"right"` |
+| `snr_proxy` | `q_score` from manifest (quality proxy ∈ [0,1]) | `0.252` |
+
+**Current status**: DONE — 224/224 files patched (2026-03-18).
+
+---
+
 ## Step 5 — Phase Unwrapping with SNAPHU
 
 **Script**: `scripts/unwrap_snaphu.py`
@@ -285,23 +326,30 @@ conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu \
 # or:
 conda install --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu \
     -c conda-forge snaphu-py
+# Verify: conda run --prefix ... python -c "import snaphu; print(snaphu.__version__)"
 ```
 
+**Important**: use the direct Python path (not `conda run`) for real-time log output on large runs.
+All Capella pairs are 4096×4096 pixels; the script automatically uses 2×2 tiling for these.
+
 ```bash
-# Unwrap all processed pairs with DEFO mode (2 workers):
-py scripts/unwrap_snaphu.py \
+# Unwrap all processed pairs with DEFO mode, 4 workers (recommended):
+DIRECT_PY=/scratch/gdemil24/hrwsi_s3client/torch-gpu/bin/python
+$DIRECT_PY -u scripts/unwrap_snaphu.py \
     --pairs_dir data/processed/pairs \
     --mode DEFO \
-    --workers 2
+    --nlooks 9.0 \
+    --coh_threshold 0.1 \
+    --workers 4
 
 # Use TOPO mode for DEM estimation:
-py scripts/unwrap_snaphu.py \
+$DIRECT_PY -u scripts/unwrap_snaphu.py \
     --pairs_dir data/processed/pairs \
     --mode TOPO \
-    --workers 2
+    --workers 4
 
-# Limit to 50 pairs, stricter coherence mask, custom nlooks:
-py scripts/unwrap_snaphu.py \
+# Limit to 50 pairs, stricter coherence mask:
+$DIRECT_PY -u scripts/unwrap_snaphu.py \
     --pairs_dir data/processed/pairs \
     --max_pairs 50 \
     --mode DEFO \
@@ -310,11 +358,11 @@ py scripts/unwrap_snaphu.py \
     --workers 4
 
 # Write unwrapped outputs to a separate directory:
-py scripts/unwrap_snaphu.py \
+$DIRECT_PY -u scripts/unwrap_snaphu.py \
     --pairs_dir data/processed/pairs \
     --out_dir data/processed/unwrapped \
     --mode DEFO \
-    --workers 2
+    --workers 4
 ```
 
 **All flags**:
@@ -331,7 +379,7 @@ py scripts/unwrap_snaphu.py \
 
 **Output per pair**: `unw_phase.tif` — float32 GeoTIFF, unwrapped phase in radians, NaN at masked/incoherent pixels.
 
-**Current status**: PENDING — snaphu-py not yet installed.
+**Current status**: RUNNING — snaphu-py 0.4.1 installed; 224 pairs being unwrapped (4 workers, started 13:15 Mar 18, ETA ~9 AM Mar 19).
 
 ---
 
@@ -419,7 +467,7 @@ loss_weights:
 
 Each checkpoint stores: model state dict, optimizer state, epoch number, all three config dicts, git commit hash.
 
-**Current status**: IN PROGRESS — checkpoint at `experiments/enhanced/checkpoints/film_unet/best_closure.pt`.
+**Current status**: RUNNING — epoch 5/50 completed at 13:02 Mar 18; ETA ~9 AM Mar 19. `best_closure.pt` and `epoch_005.pt` written.
 
 ---
 
@@ -503,7 +551,7 @@ py eval/compute_metrics.py \
 | `figures/phase_comparison.png` | Side-by-side raw / Goldstein / FiLMUNet phase images |
 | `figures/temporal_residual_bar.png` | Bar chart of Metric 5 for both methods |
 
-**Current metric values** (2026-03-17, `--skip_inference --skip_snaphu_metrics`, 162 pairs):
+**Current metric values** (2026-03-18, `--skip_inference --skip_snaphu_metrics`, 162 pairs):
 
 | Metric | Goldstein | FiLMUNet | Status |
 |--------|-----------|----------|--------|
@@ -637,18 +685,22 @@ conda run --prefix $PREFIX python scripts/preprocess_pairs.py \
     --out_dir data/processed/pairs \
     --patch_size 4096 --adaptive --n_workers 4
 
-# ── 6. Install snaphu-py then unwrap (PENDING) ───────────────────────────────
-conda run --prefix $PREFIX pip install snaphu
-conda run --prefix $PREFIX python scripts/unwrap_snaphu.py \
+# ── 5b. Patch FiLM metadata (DONE — 224/224 files) ───────────────────────────
+conda run --prefix $PREFIX python scripts/patch_coreg_meta.py \
     --pairs_dir data/processed/pairs \
-    --mode DEFO --coh_threshold 0.1 --nlooks 25 --workers 4
+    --manifest  data/manifests/hawaii_pairs.parquet
 
-# ── 7. Train FiLMUNet (IN PROGRESS) ──────────────────────────────────────────
+# ── 6. Unwrap with SNAPHU (RUNNING — 224 pairs, ~23h) ────────────────────────
+# Use direct Python path for real-time output visibility on large jobs:
+$PREFIX/bin/python -u scripts/unwrap_snaphu.py \
+    --pairs_dir data/processed/pairs \
+    --mode DEFO --coh_threshold 0.1 --nlooks 9.0 --workers 4
+
+# ── 7. Train FiLMUNet (RUNNING — epoch 5/50) ─────────────────────────────────
 conda run --prefix $PREFIX python experiments/enhanced/train_film_unet.py \
     --data_config  configs/data/capella_aoi_selection.yaml \
     --model_config configs/model/film_unet.yaml \
-    --train_config configs/train/contest.yaml \
-    --resume experiments/enhanced/checkpoints/film_unet/best_closure.pt
+    --train_config configs/train/contest.yaml
 
 # ── 8. Evaluate all 5 contest metrics ────────────────────────────────────────
 conda run --prefix $PREFIX python eval/compute_metrics.py \

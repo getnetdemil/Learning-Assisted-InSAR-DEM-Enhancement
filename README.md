@@ -32,7 +32,7 @@ A competitive entry must be **pair-graph-aware** and **geometry-conditioned**. O
 | 4 | DEM NMAD | `1.4826 × median(|e − median(e)|)` over stable terrain | ↓ ≥ 15% |
 | 5 | Temporal consistency residual | SBAS inversion residual `‖W(Ax − φ̂)‖₂` | ↓ ≥ 20% |
 
-**Current baseline values** (Goldstein, 162 processed pairs, Hawaii AOI, 2026-03-17):
+**Current baseline values** (Goldstein, 162 processed pairs, Hawaii AOI, 2026-03-18):
 
 | Metric | Goldstein | Status |
 |--------|-----------|--------|
@@ -129,6 +129,7 @@ scripts/
   download_subset.py                  # STAC crawl → manifest; S3 parallel download
   preprocess_pairs.py                 # Coreg → interferogram → coherence → Goldstein
   select_triplet_completing_pairs.py  # Find pairs to close open 2-leg triplets
+  patch_coreg_meta.py                 # Add FiLM metadata fields to coreg_meta.json
   unwrap_snaphu.py                    # SNAPHU phase unwrapping (snaphu-py backend)
 
 eval/
@@ -226,7 +227,7 @@ data/processed/pairs/<id_ref>__<id_sec>/
     ifg_raw.tif          (2-band float32: Re, Im)
     ifg_goldstein.tif    (2-band float32: Goldstein-filtered Re, Im)
     coherence.tif        (1-band float32: [0,1])
-    coreg_meta.json      (dt_days, bperp_m, q_score, offsets, …)
+    coreg_meta.json      (dt_days, bperp_m, q_score, offsets, incidence_angle_deg, mode, look_direction, snr_proxy)
        │
        ├──▶  scripts/unwrap_snaphu.py
        │         unw_phase.tif  (1-band float32: unwrapped phase, NaN=masked)
@@ -277,12 +278,13 @@ experiments/enhanced/outputs/
 | Goldstein + adaptive filter | `src/insar_processing/filters.py` | ✅ Done |
 | Preprocessing pipeline | `scripts/preprocess_pairs.py` | ✅ Done |
 | Triplet network repair | `scripts/select_triplet_completing_pairs.py` | ✅ Done |
+| FiLM metadata patch | `scripts/patch_coreg_meta.py` | ✅ Done (224/224 pairs) |
 | FiLM-conditioned U-Net | `src/models/film_unet.py` | ✅ Done |
 | Physics loss suite | `src/losses/physics_losses.py` | ✅ Done |
-| FiLMUNet training | `experiments/enhanced/train_film_unet.py` | ✅ Done (50 epochs) |
+| FiLMUNet training | `experiments/enhanced/train_film_unet.py` | 🔄 Running (epoch 5/50, Mar 18) |
 | All 5 contest metrics | `src/evaluation/closure_metrics.py` | ✅ Done |
 | Metric evaluation script | `eval/compute_metrics.py` | ✅ Done |
-| SNAPHU unwrapping | `scripts/unwrap_snaphu.py` | ⏳ Pending (snaphu-py install) |
+| SNAPHU unwrapping | `scripts/unwrap_snaphu.py` | 🔄 Running (224 pairs, 4 workers, Mar 18) |
 | Reference DEM (M4) | — | ⏳ Pending |
 | Ablation studies (5 variants) | — | ⏳ Mar 21–24 |
 | Zero-shot transfer AOI_008 | — | ⏳ Mar 25–27 |
