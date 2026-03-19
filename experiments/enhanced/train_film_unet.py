@@ -127,23 +127,40 @@ class InSARTileDataset(Dataset):
         import rasterio
         T = self.tile_size
         window = rasterio.windows.Window(c, r, T, T)
-        ifg_path = pair_dir / "ifg_goldstein.tif"
-        coh_path = pair_dir / "coherence.tif"
 
-        with rasterio.open(ifg_path) as src:
-            data = src.read(window=window)  # (2, T, T) Re+Im or (1, T, T) complex
+        # Goldstein (pseudo-clean target)
+        with rasterio.open(pair_dir / "ifg_goldstein.tif") as src:
+            data = src.read(window=window)
             if data.shape[0] == 1:
-                # Complex int — convert
                 cplx = data[0].astype(np.complex64)
-                re = cplx.real
-                im = cplx.imag
+                re_gold, im_gold = cplx.real, cplx.imag
             else:
-                re, im = data[0].astype(np.float32), data[1].astype(np.float32)
+                re_gold, im_gold = data[0].astype(np.float32), data[1].astype(np.float32)
 
-        with rasterio.open(coh_path) as src:
+        # Raw (noisy input) — fallback to Goldstein if missing
+        raw_path = pair_dir / "ifg_raw.tif"
+        if raw_path.exists():
+            with rasterio.open(raw_path) as src:
+                data = src.read(window=window)
+                if data.shape[0] == 1:
+                    cplx = data[0].astype(np.complex64)
+                    re_raw, im_raw = cplx.real, cplx.imag
+                else:
+                    re_raw, im_raw = data[0].astype(np.float32), data[1].astype(np.float32)
+        else:
+            re_raw, im_raw = re_gold, im_gold
+
+        with rasterio.open(pair_dir / "coherence.tif") as src:
             coh = src.read(1, window=window).astype(np.float32)
 
-        return re, im, coh
+        # Guard against NaN/Inf from edge pixels or masked nodata
+        re_raw  = np.nan_to_num(re_raw,  nan=0.0, posinf=0.0, neginf=0.0)
+        im_raw  = np.nan_to_num(im_raw,  nan=0.0, posinf=0.0, neginf=0.0)
+        re_gold = np.nan_to_num(re_gold, nan=0.0, posinf=0.0, neginf=0.0)
+        im_gold = np.nan_to_num(im_gold, nan=0.0, posinf=0.0, neginf=0.0)
+        coh     = np.nan_to_num(coh,     nan=0.0, posinf=1.0, neginf=0.0)
+
+        return re_raw, im_raw, re_gold, im_gold, coh
 
     def _load_meta(self, pair_dir: Path) -> np.ndarray:
         meta_path = pair_dir / "coreg_meta.json"
@@ -163,31 +180,37 @@ class InSARTileDataset(Dataset):
         return (raw - self._META_MEAN) / (self._META_STD + 1e-8)
 
     @staticmethod
-    def _augment(re, im, coh):
+    def _augment(re_raw, im_raw, re_gold, im_gold, coh):
         """Physically-safe augmentations: rotations, flips, global phase offset."""
         k = random.randint(0, 3)
-        re = np.rot90(re, k).copy()
-        im = np.rot90(im, k).copy()
-        coh = np.rot90(coh, k).copy()
+        re_raw  = np.rot90(re_raw,  k).copy()
+        im_raw  = np.rot90(im_raw,  k).copy()
+        re_gold = np.rot90(re_gold, k).copy()
+        im_gold = np.rot90(im_gold, k).copy()
+        coh     = np.rot90(coh,     k).copy()
         if random.random() > 0.5:
-            re = np.fliplr(re).copy()
-            im = np.fliplr(im).copy()
-            coh = np.fliplr(coh).copy()
-        # Global phase offset (does not affect closure or N2N residuals)
+            re_raw  = np.fliplr(re_raw).copy()
+            im_raw  = np.fliplr(im_raw).copy()
+            re_gold = np.fliplr(re_gold).copy()
+            im_gold = np.fliplr(im_gold).copy()
+            coh     = np.fliplr(coh).copy()
+        # Global phase offset applied consistently to both raw and gold
         phi_offset = random.uniform(-np.pi, np.pi)
         cos_o, sin_o = np.cos(phi_offset), np.sin(phi_offset)
-        re_new = re * cos_o - im * sin_o
-        im_new = re * sin_o + im * cos_o
+        re_raw_new  = re_raw  * cos_o - im_raw  * sin_o
+        im_raw_new  = re_raw  * sin_o + im_raw  * cos_o
+        re_gold_new = re_gold * cos_o - im_gold * sin_o
+        im_gold_new = re_gold * sin_o + im_gold * cos_o
         # Amplitude jitter ±10%
         scale = random.uniform(0.9, 1.1)
-        return re_new * scale, im_new * scale, coh
+        return re_raw_new * scale, im_raw_new * scale, re_gold_new * scale, im_gold_new * scale, coh
 
     def __len__(self) -> int:
         return len(self.tiles)
 
     def __getitem__(self, idx: int) -> Optional[dict]:
         pair_dir, r, c = self.tiles[idx]
-        re, im, coh = self._load_tile(pair_dir, r, c)
+        re_raw, im_raw, re_gold, im_gold, coh = self._load_tile(pair_dir, r, c)
 
         if coh.mean() < self.min_coherence:
             # Return a random other tile to avoid None in DataLoader
@@ -195,21 +218,25 @@ class InSARTileDataset(Dataset):
             return self[alt]
 
         if self.augment:
-            re, im, coh = self._augment(re, im, coh)
+            re_raw, im_raw, re_gold, im_gold, coh = self._augment(
+                re_raw, im_raw, re_gold, im_gold, coh)
 
         meta = self._load_meta(pair_dir)
-        phi = np.arctan2(im, re).astype(np.float32)
+        phi = np.arctan2(im_gold, re_gold).astype(np.float32)  # Goldstein phase as reference
 
         if self.in_channels == 3:
-            x = np.stack([re, im, coh], axis=0)
+            x = np.stack([re_raw, im_raw, coh], axis=0)    # noisy input
         else:
-            x = np.stack([re, im], axis=0)
+            x = np.stack([re_raw, im_raw], axis=0)
+
+        gold = np.stack([re_gold, im_gold], axis=0)         # pseudo-clean target
 
         return {
-            "x": torch.from_numpy(x),
+            "x":        torch.from_numpy(x),
+            "gold":     torch.from_numpy(gold),
             "metadata": torch.from_numpy(meta),
-            "phi": torch.from_numpy(phi),
-            "pair_id": str(pair_dir.name),
+            "phi":      torch.from_numpy(phi),
+            "pair_id":  str(pair_dir.name),
         }
 
 
@@ -272,6 +299,7 @@ def run_epoch(
     optimizer: Optional[torch.optim.Optimizer],
     device: torch.device,
     grad_clip: float = 1.0,
+    zero_metadata: bool = False,
 ) -> dict:
     training = optimizer is not None
     model.train(training)
@@ -280,23 +308,19 @@ def run_epoch(
 
     with torch.set_grad_enabled(training):
         for batch in loader:
-            x = batch["x"].float().to(device)          # (B, C, H, W)
-            meta = batch["metadata"].float().to(device) # (B, 7)
+            x    = batch["x"].float().to(device)          # (B, C, H, W) — raw (noisy)
+            gold = batch["gold"].float().to(device)        # (B, 2, H, W) — Goldstein (pseudo-clean)
+            meta = batch["metadata"].float().to(device)
+            if zero_metadata:
+                meta = torch.zeros_like(meta)              # ablation V5: no FiLM conditioning
 
             denoised, log_var = model(x, meta)
 
-            # For N2N: split the batch in half as proxy sub-look pair
-            # (during actual training, pass real sub-look A/B pairs)
-            half = x.shape[0] // 2
-            if half < 1:
-                continue
-
-            # Use first half's prediction vs second half's input as N2N target
             inp = PhysicsLossInputs(
-                pred_a=denoised[:half, :2],
-                sublook_b=x[half:half * 2, :2],
-                log_var=log_var[:half],
-                full_look=x[:half, :2],
+                pred_a=denoised,      # model prediction on raw input
+                sublook_b=gold,       # Goldstein as N2N target
+                log_var=log_var,
+                full_look=gold,       # gradient loss: model output vs Goldstein
             )
             loss, breakdown = criterion(inp)
 
@@ -321,6 +345,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model_config", required=True)
     p.add_argument("--train_config", required=True)
     p.add_argument("--resume", default=None, help="Path to checkpoint to resume from.")
+
+    # Ablation overrides — override the YAML loss weights at the CLI level
+    p.add_argument("--loss_n2n",     type=float, default=None, help="Override loss_weights.n2n")
+    p.add_argument("--loss_unc",     type=float, default=None, help="Override loss_weights.unc")
+    p.add_argument("--loss_closure", type=float, default=None, help="Override loss_weights.closure")
+    p.add_argument("--loss_temporal",type=float, default=None, help="Override loss_weights.temporal")
+    p.add_argument("--loss_grad",    type=float, default=None, help="Override loss_weights.grad")
+    p.add_argument("--epochs",       type=int,   default=None, help="Override num_epochs")
+    # run_name creates a subdirectory under output_dir for isolated ablation checkpoints
+    p.add_argument("--run_name",     default=None,
+                   help="Subdirectory name under output_dir for this ablation run.")
+    # V5 ablation: pass zeros as metadata (disables FiLM geometric conditioning)
+    p.add_argument("--zero_film",    action="store_true",
+                   help="Zero out metadata vector — tests without FiLM conditioning (V5).")
     return p.parse_args()
 
 
@@ -330,6 +368,23 @@ def main() -> None:
     model_cfg = load_yaml(args.model_config)
     train_cfg = load_yaml(args.train_config)
     all_configs = {"data": data_cfg, "model": model_cfg, "train": train_cfg}
+
+    # ── Apply CLI ablation overrides ──
+    lw = train_cfg.setdefault("loss_weights", {})
+    for key, val in [
+        ("n2n",     args.loss_n2n),
+        ("unc",     args.loss_unc),
+        ("closure", args.loss_closure),
+        ("temporal",args.loss_temporal),
+        ("grad",    args.loss_grad),
+    ]:
+        if val is not None:
+            lw[key] = val
+    if args.epochs is not None:
+        train_cfg["num_epochs"] = args.epochs
+    if args.run_name is not None:
+        base = train_cfg.get("output_dir", "experiments/enhanced/checkpoints/film_unet")
+        train_cfg["output_dir"] = str(Path(base) / args.run_name)
 
     set_seed(train_cfg.get("seed", 42))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -445,8 +500,9 @@ def main() -> None:
                 pg["lr"] = train_cfg.get("learning_rate", 1e-4) * lr_scale
 
         train_metrics = run_epoch(model, train_loader, criterion, optimizer,
-                                  device, grad_clip)
-        val_metrics = run_epoch(model, val_loader, criterion, None, device)
+                                  device, grad_clip, zero_metadata=args.zero_film)
+        val_metrics = run_epoch(model, val_loader, criterion, None, device,
+                                zero_metadata=args.zero_film)
 
         if epoch >= warmup:
             scheduler.step()
@@ -489,6 +545,21 @@ def main() -> None:
         val_metrics, all_configs,
     )
     print(f"Training complete. Checkpoints in {out_dir}/")
+
+    # Save training summary for ablation result collection
+    summary = {
+        "run_name": args.run_name or "default",
+        "num_epochs": num_epochs,
+        "zero_film": args.zero_film,
+        "loss_weights": all_configs["train"]["loss_weights"],
+        "best_val_closure": best_closure,
+        "final_val_metrics": val_metrics,
+        "git_hash": git_hash(),
+    }
+    summary_path = out_dir / "training_summary.json"
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Training summary: {summary_path}")
 
     if use_wandb:
         import wandb

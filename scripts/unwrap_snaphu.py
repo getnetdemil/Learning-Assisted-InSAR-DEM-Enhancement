@@ -86,18 +86,21 @@ def unwrap_with_snaphu_py(
     igram = (np.cos(wrapped_phase) + 1j * np.sin(wrapped_phase)).astype(np.complex64)
 
     # Determine tile count for large images
+    # 4096×4096 images need ntiles=(4,4) to keep each tile ≤1024×1024;
+    # larger tiles (2048×2048) hit SNAPHU's "Exceeded maximum secondary arcs" limit.
     H, W = wrapped_phase.shape
     ntiles = (1, 1)
     if max(H, W) > 8192:
-        ntiles = (4, 4)
+        ntiles = (8, 8)
     elif max(H, W) >= 4096:
+        ntiles = (4, 4)
+    elif max(H, W) > 2048:
         ntiles = (2, 2)
 
-    # tile_overlap must be large enough for the tile size to avoid SNAPHU arc errors
-    # Rule of thumb: ≥128 px, and ≥5% of the tile dimension
+    # tile_overlap: ≥128 px and ≥10% of tile dimension to satisfy SNAPHU constraints
     tile_h = H // ntiles[0] if ntiles[0] > 1 else H
     tile_w = W // ntiles[1] if ntiles[1] > 1 else W
-    tile_overlap = max(128, tile_h // 20, tile_w // 20)
+    tile_overlap = max(128, tile_h // 10, tile_w // 10)
 
     unw, conncomp = snaphu.unwrap(
         igram,

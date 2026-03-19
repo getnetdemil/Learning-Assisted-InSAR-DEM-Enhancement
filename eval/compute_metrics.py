@@ -161,7 +161,9 @@ def run_inference_on_pair(
     """
     import rasterio
 
-    with rasterio.open(pair_dir / "ifg_goldstein.tif") as src:
+    raw_path = pair_dir / "ifg_raw.tif"
+    ifg_src = raw_path if raw_path.exists() else pair_dir / "ifg_goldstein.tif"
+    with rasterio.open(ifg_src) as src:
         re  = src.read(1).astype(np.float32)
         im  = src.read(2).astype(np.float32)
     with rasterio.open(pair_dir / "coherence.tif") as src:
@@ -738,6 +740,8 @@ def parse_args() -> argparse.Namespace:
                    help="Fraction of pairs to use as the held-out test set.")
     p.add_argument("--skip_inference", action="store_true",
                    help="Skip model inference (re-use existing ifg_film_unet.tif).")
+    p.add_argument("--force_inference", action="store_true",
+                   help="Force overwrite existing ifg_film_unet.tif (re-run inference).")
     p.add_argument("--skip_snaphu_metrics", action="store_true",
                    help="Skip metrics 2/3/4 that require unw_phase.tif.")
     p.add_argument("--test_only", action="store_true",
@@ -785,7 +789,7 @@ def main() -> None:
         model = _load_model(args.checkpoint, device)
         n_infer = 0
         for i, pd_dir in enumerate(eval_pairs):
-            if (pd_dir / "ifg_film_unet.tif").exists():
+            if (pd_dir / "ifg_film_unet.tif").exists() and not args.force_inference:
                 log.info("[%d/%d] Skipping (ifg_film_unet.tif exists): %s",
                          i + 1, len(eval_pairs), pd_dir.name)
                 continue

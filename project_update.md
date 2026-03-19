@@ -1,9 +1,9 @@
 # Learning-Assisted InSAR DEM Enhancement
 ## IEEE GRSS 2026 Data Fusion Contest — Technical Reference Document
 
-**Contest deadline**: April 06, 2026 (24 days remaining as of 2026-03-13)
+**Contest deadline**: April 06, 2026 (18 days remaining as of 2026-03-19)
 **Team**: getnetdemil
-**Last updated**: 2026-03-13
+**Last updated**: 2026-03-19
 
 ---
 
@@ -990,61 +990,114 @@ Open branches (ready for PR):
 - `feat/snaphu-12` → closes #12
 - `feat/train-film-unet-17` → closes #17 once training completes
 
+### Session 6 — 2026-03-19: Bug Fixes, Training, SNAPHU Progress
+
+**Root cause found and fixed: broken N2N training**
+- The 50-epoch `final.pt` produced M1=1.973 rad (+93.9%) and M5=0.079 rad (+57.3%)
+  vs Goldstein — WORSE on both metrics. Root cause: `run_epoch()` used the second
+  half of a batch (from different pairs) as the N2N target → model learned to predict
+  random noise. Closure and temporal losses were always 0 (inputs never set).
+- Fix: replaced cross-batch N2N with **raw → Goldstein supervised denoising**:
+  - Input: `ifg_raw.tif` (speckle-noisy), target: `ifg_goldstein.tif` (pseudo-clean)
+  - `_load_tile()`, `_augment()`, `__getitem__()`, `run_epoch()` all updated
+  - `eval/compute_metrics.py run_inference_on_pair()`: now reads `ifg_raw.tif` as input
+
+**Second bug found and fixed: NaN loss from fresh initialization**
+- `uncertainty_nll_loss()` in `src/losses/physics_losses.py:94` computes
+  `exp(-log_var)` without clamping. Fresh `head_log_var` Conv init → extreme `lv` →
+  `exp(-lv)` overflows → NaN propagates through all loss terms.
+- Fix: added `.clamp(-10, 10)` on `log_var` in `src/models/film_unet.py:158`.
+- Belt-and-suspenders: added `np.nan_to_num` guards on all five arrays returned by
+  `_load_tile()` in `experiments/enhanced/train_film_unet.py` — protects against
+  edge-pixel nodata from rasterio windowed reads.
+
+**Metric baseline (Goldstein, 62 triplets):**
+- M1 Triplet Closure Error: **1.018 rad** ✓
+- M2 Unwrap Success Rate: N/A (SNAPHU in progress)
+- M3 Usable Pairs: 0.0 (closure > 0.5 threshold; needs FiLMUNet improvement)
+- M4 DEM NMAD: N/A (needs reference DEM)
+- M5 Temporal Residual: **0.050 rad** ✓
+
+**SNAPHU progress**: 70/224 pairs unwrapped as of Mar 19 (31.3%, ETA ~Mar 21).
+Fixed ntiles bug (Mar 18): `≥4096px → (4,4)` tiles instead of `(2,2)` — prevents
+"Exceeded maximum secondary arcs" error.
+
+**Retraining (raw2gold_30ep, PID 3618843)**: restarted with NaN fix, 149,916 train
+tiles, 30 epochs, ETA ~Mar 19 21:00 EET.
+Checkpoint: `experiments/enhanced/checkpoints/film_unet/raw2gold_30ep/final.pt`
+
+**Phase 3 implementation (completed 2026-03-18):**
+- `eval/compute_metrics.py` — all 5 contest metrics (950 lines)
+- `experiments/enhanced/train_film_unet.py` — CLI ablation overrides: `--loss_*`,
+  `--epochs`, `--run_name`, `--zero_film`; saves `training_summary.json` per run
+- `scripts/run_ablations.sh` — V1–V5 ablation variants (20 epochs each)
+- `scripts/collect_ablation_results.py` — aggregates results → Markdown table
+- `eval/zero_shot_transfer.py` — AOI_008 (LA) select + eval pipeline
+- `REPRODUCIBILITY.md` — contest requirement, with real SHA-256 checksums
+
+**Paper**: `Latex_Paper_Temporal_SAR_Change/main.tex` structure complete.
+Tables 1 and 2 have `[XX]` placeholders awaiting eval + ablation results.
+Figures already copied: `closure_histogram.png`, `phase_comparison.png`,
+`temporal_residual_bar.png` → `Latex_Paper_Temporal_SAR_Change/figures/`.
+
 ---
 
 ## 11. Remaining Work
 
 ### 11.1 Critical Path (Before Contest Submission, April 06)
 
-| Task | Issue | Priority | Status |
-|------|-------|----------|--------|
-| Finish training (epochs 21–50) | #17 | CRITICAL | IN PROGRESS |
-| Install SNAPHU; run on 100 pairs | #12 | CRITICAL | Blocked (SNAPHU install) |
-| `eval/compute_metrics.py` (contest tables + figures) | #20 | CRITICAL | Not started |
-| Run ablation studies (5 variants) | #19 | HIGH | Not started |
-| Generate paper figures | #21 | HIGH | Not started |
-| Zero-shot transfer to AOI_008 (LA) | #18 | MEDIUM | Not started |
-| Write 4-page IEEE contest paper | #22 | CRITICAL | Not started |
-| `REPRODUCIBILITY.md` | #23 | HIGH | Not started |
-| Pair-graph visualisation notebook | #8 | LOW | Not started |
+| Task | Priority | Status |
+|------|----------|--------|
+| Fix NaN loss (clamp log_var) | CRITICAL | **DONE (2026-03-19)** |
+| Retrain 30ep (raw2gold, PID 3618843) | CRITICAL | **IN PROGRESS (ETA Mar 19 ~21:00)** |
+| SNAPHU unwrapping 224 pairs | CRITICAL | **IN PROGRESS (70/224, ETA Mar 21)** |
+| Re-eval with fixed model (M1, M5) | CRITICAL | Pending (after retraining) |
+| Ablations V1–V5 (20 ep each) | HIGH | Pending (after retraining) |
+| Full eval M2/M3 (after SNAPHU) | HIGH | Pending (after SNAPHU ~Mar 21) |
+| Zero-shot transfer AOI_008 (LA) | MEDIUM | Pending (~Mar 25) |
+| Fill paper `[XX]` placeholders | CRITICAL | Pending (after eval + ablations) |
+| Final review + REPRODUCIBILITY.md checksums | HIGH | Pending (~Apr 1–5) |
+| Submit | CRITICAL | April 06, 2026 |
 
-### 11.2 Recommended Execution Order (Next 3 Weeks)
+### 11.2 Remaining Timeline
 
-**Week 1 (Mar 13–20):**
-Training finishes → install SNAPHU + run unwrapping on 100 pairs → implement
-`eval/compute_metrics.py` → get baseline metric numbers on Goldstein-only products
-
-**Week 2 (Mar 21–27):**
-Run FiLMUNet inference on same 100 pairs → compare FiLMUNet vs Goldstein on all 5 metrics
-→ run ablation studies (N2N-only, no closure loss, no uncertainty, no temporal loss, full)
-→ generate contest figures
-
-**Week 3 (Mar 28–Apr 5):**
-Zero-shot transfer demo on AOI_008 → write 4-page paper draft → revise + REPRODUCIBILITY.md
-→ final submission package
+| Date | Milestone |
+|------|-----------|
+| **Mar 19 (today)** | NaN fix done; training restarted (PID 3618843) |
+| **Mar 19 ~21:00** | Training done → run eval (Step 3): check M1 < 1.018 rad |
+| **Mar 20** | Eval results → start ablations V1–V5 |
+| **Mar 21** | SNAPHU done → full eval M2/M3 |
+| **Mar 22–23** | Ablations done → collect_ablation_results.py → Table 2 |
+| **Mar 25** | Zero-shot transfer AOI_008 → LA numbers |
+| **Mar 26–29** | Fill all `[XX]` in paper, write missing prose |
+| **Apr 1–5** | Final review + REPRODUCIBILITY.md checksums |
+| **Apr 6** | **SUBMIT** |
 
 ---
 
 ## 12. File Inventory
 
-| File | Phase | Status | Branch / PR |
-|------|-------|--------|-------------|
+| File | Phase | Status | Notes |
+|------|-------|--------|-------|
 | `src/insar_processing/pair_graph.py` | 1 | **DONE** | main |
 | `src/insar_processing/geometry.py` | 1 | **DONE** | main |
 | `src/insar_processing/sublook.py` | 1 | **DONE** | main |
 | `src/insar_processing/filters.py` | 1 | **DONE** | main |
 | `scripts/download_subset.py` | 1 | **DONE** | main |
 | `scripts/preprocess_pairs.py` | 1 | **DONE** | main |
-| `src/models/film_unet.py` | 2 | **DONE** | PR #25 (dev) |
-| `src/losses/physics_losses.py` | 2 | **DONE** | PR #26 (dev) |
-| `src/losses/__init__.py` | 2 | **DONE** | feat/train-film-unet-17 |
-| `experiments/enhanced/train_film_unet.py` | 2 | **DONE** | PR #27 (dev) |
-| `src/evaluation/closure_metrics.py` | 3 | **DONE** | feat/closure-metrics-13 |
-| `scripts/unwrap_snaphu.py` | 2 | **DONE** | feat/snaphu-12 |
-| `eval/compute_metrics.py` | 3 | PENDING | — |
-| `scripts/run_ablations.py` | 3 | PENDING | — |
-| `REPRODUCIBILITY.md` | 4 | PENDING | — |
-| Contest paper (4-page IEEE format) | 4 | PENDING | — |
+| `scripts/patch_coreg_meta.py` | 1 | **DONE** | main — 224/224 patched |
+| `src/models/film_unet.py` | 2 | **DONE** | NaN fix: `.clamp(-10,10)` on log_var |
+| `src/losses/physics_losses.py` | 2 | **DONE** | 5-component InSARLoss |
+| `src/losses/__init__.py` | 2 | **DONE** | package init |
+| `experiments/enhanced/train_film_unet.py` | 2 | **DONE** | raw→gold N2N + nan_to_num guards |
+| `src/evaluation/closure_metrics.py` | 3 | **DONE** | all 5 contest metrics |
+| `scripts/unwrap_snaphu.py` | 2 | **DONE** | running (70/224, ETA Mar 21) |
+| `eval/compute_metrics.py` | 3 | **DONE** | 950 lines, all 5 metrics |
+| `scripts/run_ablations.sh` | 3 | **DONE** | V1–V5, ready to run |
+| `scripts/collect_ablation_results.py` | 3 | **DONE** | aggregates → Markdown table |
+| `eval/zero_shot_transfer.py` | 3 | **DONE** | AOI_008 pipeline, not yet run |
+| `REPRODUCIBILITY.md` | 4 | **DONE** | real checksums; needs final update |
+| `Latex_Paper_Temporal_SAR_Change/main.tex` | 4 | IN PROGRESS | `[XX]` placeholders for eval data |
 
 ---
 

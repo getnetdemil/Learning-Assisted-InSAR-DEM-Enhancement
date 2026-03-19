@@ -155,5 +155,5 @@ class FiLMUNet(nn.Module):
             x = up_conv(x, c)
 
         denoised = self.head_denoised(x)
-        log_var = self.head_log_var(x)
+        log_var = self.head_log_var(x).clamp(-10, 10)
         return denoised, log_var
