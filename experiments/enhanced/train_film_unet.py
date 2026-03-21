@@ -19,10 +19,12 @@ Each checkpoint stores: model state, optimizer state, epoch, config dicts, git h
 import argparse
 import hashlib
 import json
+import logging
 import os
 import random
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -39,6 +41,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from models.film_unet import FiLMUNet
 from losses.physics_losses import InSARLoss, LossWeights, PhysicsLossInputs
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger(__name__)
 
 
 # ─── utilities ────────────────────────────────────────────────────────────────
@@ -180,6 +188,27 @@ class InSARTileDataset(Dataset):
         return (raw - self._META_MEAN) / (self._META_STD + 1e-8)
 
     @staticmethod
+    def _load_meta_static(pair_dir: Path) -> np.ndarray:
+        """Static version of _load_meta — used by TripletTileDataset."""
+        _META_MEAN = np.array([30.0, 45.0, 35.0, 500.0, 0.5, 0.5, 0.5], dtype=np.float32)
+        _META_STD  = np.array([60.0,  8.0,  8.0, 2000.0, 0.5, 0.5, 0.3], dtype=np.float32)
+        meta_path = pair_dir / "coreg_meta.json"
+        try:
+            with open(meta_path) as f:
+                m = json.load(f)
+            dt    = float(m.get("dt_days", 30.0))
+            inc   = float(m.get("incidence_angle_deg", 45.0))
+            graze = 90.0 - inc
+            bperp = float(m.get("bperp_m", 500.0))
+            mode  = 1.0 if str(m.get("mode", "")).upper() == "SL" else 0.0
+            look  = 1.0 if str(m.get("look_direction", "")).upper() == "RIGHT" else 0.0
+            snr   = float(m.get("snr_proxy", 0.5))
+            raw   = np.array([dt, inc, graze, bperp, mode, look, snr], dtype=np.float32)
+        except Exception:
+            raw = _META_MEAN.copy()
+        return (raw - _META_MEAN) / (_META_STD + 1e-8)
+
+    @staticmethod
     def _augment(re_raw, im_raw, re_gold, im_gold, coh):
         """Physically-safe augmentations: rotations, flips, global phase offset."""
         k = random.randint(0, 3)
@@ -238,6 +267,152 @@ class InSARTileDataset(Dataset):
             "phi":      torch.from_numpy(phi),
             "pair_id":  str(pair_dir.name),
         }
+
+
+def _pair_key(row, edge: str) -> str:
+    """Build pair dir name (id_ref__id_sec) from triplet row for edge 'ij', 'jk', or 'ik'.
+
+    Triplet manifest columns: id_a, id_b, id_c.
+    Edge mapping: ij=a→b, jk=b→c, ik=a→c  (double-underscore separator, matches dir names).
+    """
+    _edge_map = {"ij": ("id_a", "id_b"), "jk": ("id_b", "id_c"), "ik": ("id_a", "id_c")}
+    col_ref, col_sec = _edge_map[edge]
+    return f"{row[col_ref]}__{row[col_sec]}"
+
+
+class TripletTileDataset(Dataset):
+    """
+    Each item is a spatially-aligned tile from all 3 pairs of a closure triplet.
+    Enables the closure loss in run_epoch().
+
+    triplets_df : DataFrame with columns id_ref_ij, id_sec_ij,
+                  id_ref_jk, id_sec_jk, id_ref_ik, id_sec_ik
+    pair_dir_map: {pair_id -> Path} built from discover_pair_dirs()
+    """
+
+    def __init__(
+        self,
+        triplets_df: pd.DataFrame,
+        pair_dir_map: Dict[str, Path],
+        tile_size: int = 256,
+        stride: int = 128,
+        min_coherence: float = 0.15,
+    ):
+        self.tile_size = tile_size
+        self.min_coherence = min_coherence
+        self.tiles: List[Tuple] = []  # (dir_ij, dir_jk, dir_ik, r, c)
+
+        for _, row in triplets_df.iterrows():
+            # Try canonical order first; fall back to reversed (ref/sec swapped)
+            _edge_rev = {"ij": ("id_b", "id_a"), "jk": ("id_c", "id_b"), "ik": ("id_c", "id_a")}
+            def _lookup(edge):
+                key = _pair_key(row, edge)
+                if key in pair_dir_map:
+                    return pair_dir_map[key]
+                cols = _edge_rev[edge]
+                rev = f"{row[cols[0]]}__{row[cols[1]]}"
+                return pair_dir_map.get(rev)
+            dir_ij = _lookup("ij")
+            dir_jk = _lookup("jk")
+            dir_ik = _lookup("ik")
+            if None in (dir_ij, dir_jk, dir_ik):
+                continue
+            try:
+                import rasterio
+                with rasterio.open(dir_ij / "ifg_goldstein.tif") as src:
+                    H, W = src.height, src.width
+            except Exception:
+                continue
+            T, S = tile_size, stride
+            for r in range(0, H - T + 1, S):
+                for c in range(0, W - T + 1, S):
+                    self.tiles.append((dir_ij, dir_jk, dir_ik, r, c))
+            # Cover bottom-right corner
+            if H > T:
+                for c in range(0, W - T + 1, S):
+                    self.tiles.append((dir_ij, dir_jk, dir_ik, H - T, c))
+            if W > T:
+                for r in range(0, H - T + 1, S):
+                    self.tiles.append((dir_ij, dir_jk, dir_ik, r, W - T))
+
+    def __len__(self) -> int:
+        return len(self.tiles)
+
+    def __getitem__(self, idx: int) -> dict:
+        dir_ij, dir_jk, dir_ik, r, c = self.tiles[idx]
+        tile_ij = self._load(dir_ij, r, c)
+        tile_jk = self._load(dir_jk, r, c)
+        tile_ik = self._load(dir_ik, r, c)
+        if any(t is None for t in (tile_ij, tile_jk, tile_ik)):
+            alt = random.randint(0, len(self.tiles) - 1)
+            return self[alt]
+        x_ij, gold_ij, phi_ij, coh_ij = tile_ij
+        x_jk, gold_jk, phi_jk, _      = tile_jk
+        x_ik, gold_ik, phi_ik, _      = tile_ik
+        return {
+            "x_ij":    torch.from_numpy(x_ij),
+            "gold_ij": torch.from_numpy(gold_ij),
+            "phi_ij":  torch.from_numpy(phi_ij),
+            "x_jk":    torch.from_numpy(x_jk),
+            "gold_jk": torch.from_numpy(gold_jk),
+            "phi_jk":  torch.from_numpy(phi_jk),
+            "x_ik":    torch.from_numpy(x_ik),
+            "gold_ik": torch.from_numpy(gold_ik),
+            "phi_ik":  torch.from_numpy(phi_ik),
+            "coh_ij":  torch.from_numpy(coh_ij),
+            "meta_ij": torch.from_numpy(InSARTileDataset._load_meta_static(dir_ij)),
+            "meta_jk": torch.from_numpy(InSARTileDataset._load_meta_static(dir_jk)),
+            "meta_ik": torch.from_numpy(InSARTileDataset._load_meta_static(dir_ik)),
+        }
+
+    def _load(
+        self, pair_dir: Path, r: int, c: int
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        """Returns (x, gold, phi, coh) arrays or None if low coherence."""
+        import rasterio
+        T = self.tile_size
+        window = rasterio.windows.Window(c, r, T, T)
+        try:
+            with rasterio.open(pair_dir / "ifg_goldstein.tif") as src:
+                data = src.read(window=window)
+            if data.shape[0] == 1:
+                cplx = data[0].astype(np.complex64)
+                re_gold, im_gold = cplx.real, cplx.imag
+            else:
+                re_gold = data[0].astype(np.float32)
+                im_gold = data[1].astype(np.float32)
+            re_gold = np.nan_to_num(re_gold, nan=0.0)
+            im_gold = np.nan_to_num(im_gold, nan=0.0)
+
+            raw_path = pair_dir / "ifg_raw.tif"
+            if raw_path.exists():
+                with rasterio.open(raw_path) as src:
+                    raw = src.read(window=window)
+                if raw.shape[0] == 1:
+                    cplx = raw[0].astype(np.complex64)
+                    re_raw, im_raw = cplx.real, cplx.imag
+                else:
+                    re_raw = raw[0].astype(np.float32)
+                    im_raw = raw[1].astype(np.float32)
+                re_raw = np.nan_to_num(re_raw, nan=0.0)
+                im_raw = np.nan_to_num(im_raw, nan=0.0)
+            else:
+                re_raw, im_raw = re_gold.copy(), im_gold.copy()
+
+            with rasterio.open(pair_dir / "coherence.tif") as src:
+                coh = np.nan_to_num(
+                    src.read(1, window=window).astype(np.float32), nan=0.0
+                )
+        except Exception:
+            return None
+
+        if coh.mean() < self.min_coherence:
+            return None
+
+        x    = np.stack([re_raw, im_raw, coh], axis=0)          # (3, H, W)
+        gold = np.stack([re_gold, im_gold], axis=0)              # (2, H, W)
+        phi  = np.arctan2(im_gold, re_gold)[np.newaxis].astype(np.float32)  # (1, H, W)
+        return x, gold, phi, coh[np.newaxis]
 
 
 # ─── data loading helpers ─────────────────────────────────────────────────────
@@ -300,11 +475,15 @@ def run_epoch(
     device: torch.device,
     grad_clip: float = 1.0,
     zero_metadata: bool = False,
+    triplet_loader: Optional[DataLoader] = None,
 ) -> dict:
     training = optimizer is not None
     model.train(training)
     totals: Dict[str, float] = {}
     n = 0
+
+    # Prepare triplet iterator (cycles over triplet batches in lock-step with main loader)
+    _triplet_iter = iter(triplet_loader) if (triplet_loader is not None and training) else None
 
     with torch.set_grad_enabled(training):
         for batch in loader:
@@ -334,6 +513,54 @@ def run_epoch(
                 totals[k] = totals.get(k, 0.0) + v
             n += 1
 
+            # ── Closure loss from triplet batch ──────────────────────────────
+            if _triplet_iter is not None:
+                try:
+                    tri = next(_triplet_iter)
+                except StopIteration:
+                    _triplet_iter = iter(triplet_loader)
+                    tri = next(_triplet_iter)
+
+                x_ij = tri["x_ij"].float().to(device)
+                x_jk = tri["x_jk"].float().to(device)
+                x_ik = tri["x_ik"].float().to(device)
+                if zero_metadata:
+                    m_ij = torch.zeros(x_ij.shape[0], 7, device=device)
+                    m_jk = torch.zeros_like(m_ij)
+                    m_ik = torch.zeros_like(m_ij)
+                else:
+                    m_ij = tri["meta_ij"].float().to(device)
+                    m_jk = tri["meta_jk"].float().to(device)
+                    m_ik = tri["meta_ik"].float().to(device)
+
+                d_ij, lv_ij = model(x_ij, m_ij)
+                d_jk, _     = model(x_jk, m_jk)
+                d_ik, _     = model(x_ik, m_ik)
+
+                phi_ij = torch.atan2(d_ij[:, 1], d_ij[:, 0])  # (B, H, W)
+                phi_jk = torch.atan2(d_jk[:, 1], d_jk[:, 0])
+                phi_ik = torch.atan2(d_ik[:, 1], d_ik[:, 0])
+
+                clos_inp = PhysicsLossInputs(
+                    pred_a=d_ij,
+                    sublook_b=tri["gold_ij"].float().to(device),
+                    log_var=lv_ij,
+                    full_look=tri["gold_ij"].float().to(device),
+                    phi_ij=phi_ij,
+                    phi_jk=phi_jk,
+                    phi_ik=phi_ik,
+                    closure_weight=tri["coh_ij"].float().to(device).squeeze(1),
+                )
+                clos_loss, clos_breakdown = criterion(clos_inp)
+
+                optimizer.zero_grad()
+                clos_loss.backward()
+                nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
+
+                for k, v in clos_breakdown.items():
+                    totals[f"tri_{k}"] = totals.get(f"tri_{k}", 0.0) + float(v)
+
     return {k: v / max(n, 1) for k, v in totals.items()}
 
 
@@ -359,6 +586,8 @@ def parse_args() -> argparse.Namespace:
     # V5 ablation: pass zeros as metadata (disables FiLM geometric conditioning)
     p.add_argument("--zero_film",    action="store_true",
                    help="Zero out metadata vector — tests without FiLM conditioning (V5).")
+    p.add_argument("--triplets_manifest", type=str, default=None,
+                   help="Parquet of triplets; enables closure loss via TripletTileDataset.")
     return p.parse_args()
 
 
@@ -382,9 +611,10 @@ def main() -> None:
             lw[key] = val
     if args.epochs is not None:
         train_cfg["num_epochs"] = args.epochs
-    if args.run_name is not None:
-        base = train_cfg.get("output_dir", "experiments/enhanced/checkpoints/film_unet")
-        train_cfg["output_dir"] = str(Path(base) / args.run_name)
+
+    run_name = args.run_name or "filmUNet"
+    run_ts   = datetime.now().strftime('%Y%m%d_%H%M')
+    run_tag  = f"{run_name}_{run_ts}"
 
     set_seed(train_cfg.get("seed", 42))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -428,6 +658,42 @@ def main() -> None:
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                             num_workers=num_workers, pin_memory=pin_memory,
                             drop_last=False)
+
+    # ── triplet loader (closure loss) ──
+    triplet_loader = None
+    if args.triplets_manifest and Path(args.triplets_manifest).exists():
+        triplets_df = pd.read_parquet(args.triplets_manifest)
+        pair_dir_map: Dict[str, Path] = {}
+        for pd_dir in train_dirs + val_dirs:
+            # Key = dir name = "{id_ref}__{id_sec}" (matches _pair_key output)
+            pair_dir_map[pd_dir.name] = pd_dir
+            # Also index by id_ref__id_sec from coreg_meta (same thing, but verify)
+            meta_path = pd_dir / "coreg_meta.json"
+            if meta_path.exists():
+                try:
+                    with open(meta_path) as f:
+                        m = json.load(f)
+                    id_ref = m.get("id_ref", "")
+                    id_sec = m.get("id_sec", "")
+                    if id_ref and id_sec:
+                        pair_dir_map[f"{id_ref}__{id_sec}"] = pd_dir
+                except Exception:
+                    pass
+        tri_ds = TripletTileDataset(
+            triplets_df, pair_dir_map,
+            tile_size=tile_size,
+            stride=stride,
+            min_coherence=min_coh,
+        )
+        log.info("TripletTileDataset: %d triplet-tiles from %d triplets",
+                 len(tri_ds), len(triplets_df))
+        triplet_loader = DataLoader(
+            tri_ds, batch_size=batch_size,
+            shuffle=True, num_workers=num_workers,
+            pin_memory=pin_memory, drop_last=True,
+        )
+    elif args.triplets_manifest:
+        log.warning("--triplets_manifest specified but not found: %s", args.triplets_manifest)
 
     # ── model ──
     model = FiLMUNet(
@@ -482,8 +748,20 @@ def main() -> None:
             print("wandb not installed — skipping experiment tracking.")
             use_wandb = False
 
-    out_dir = Path(train_cfg.get("output_dir", "experiments/enhanced/checkpoints/film_unet"))
+    base_out = Path(train_cfg.get("output_dir", "experiments/enhanced/checkpoints/film_unet"))
+    out_dir  = base_out / run_tag
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    log_path = Path("logs") / f"{run_tag}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger().addHandler(file_handler)
+
+    print(f"Run tag : {run_tag}")
+    print(f"Ckpt dir: {out_dir}")
+    print(f"Log file: {log_path}")
+    log.info("Run tag: %s | Log: %s", run_tag, log_path)
 
     grad_clip = train_cfg.get("grad_clip", 1.0)
     save_every = train_cfg.get("save_every_n_epochs", 5)
@@ -500,7 +778,8 @@ def main() -> None:
                 pg["lr"] = train_cfg.get("learning_rate", 1e-4) * lr_scale
 
         train_metrics = run_epoch(model, train_loader, criterion, optimizer,
-                                  device, grad_clip, zero_metadata=args.zero_film)
+                                  device, grad_clip, zero_metadata=args.zero_film,
+                                  triplet_loader=triplet_loader)
         val_metrics = run_epoch(model, val_loader, criterion, None, device,
                                 zero_metadata=args.zero_film)
 
@@ -527,28 +806,29 @@ def main() -> None:
         if val_closure < best_closure:
             best_closure = val_closure
             save_checkpoint(
-                out_dir / "best_closure.pt", model, optimizer, epoch,
+                out_dir / f"{run_tag}_best_closure.pt", model, optimizer, epoch,
                 {"val_closure": val_closure}, all_configs,
             )
-            print(f"  -> best_closure.pt (closure={val_closure:.4f})")
+            print(f"  -> {run_tag}_best_closure.pt (closure={val_closure:.4f})")
 
         # Periodic checkpoint
         if (epoch + 1) % save_every == 0:
             save_checkpoint(
-                out_dir / f"epoch_{epoch+1:03d}.pt", model, optimizer, epoch,
+                out_dir / f"{run_tag}_epoch_{epoch+1:03d}.pt", model, optimizer, epoch,
                 val_metrics, all_configs,
             )
 
     # Final checkpoint
     save_checkpoint(
-        out_dir / "final.pt", model, optimizer, num_epochs - 1,
+        out_dir / f"{run_tag}_final.pt", model, optimizer, num_epochs - 1,
         val_metrics, all_configs,
     )
     print(f"Training complete. Checkpoints in {out_dir}/")
 
     # Save training summary for ablation result collection
     summary = {
-        "run_name": args.run_name or "default",
+        "run_tag": run_tag,
+        "run_name": run_name,
         "num_epochs": num_epochs,
         "zero_film": args.zero_film,
         "loss_weights": all_configs["train"]["loss_weights"],
@@ -556,7 +836,7 @@ def main() -> None:
         "final_val_metrics": val_metrics,
         "git_hash": git_hash(),
     }
-    summary_path = out_dir / "training_summary.json"
+    summary_path = out_dir / f"{run_tag}_training_summary.json"
     with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
     print(f"Training summary: {summary_path}")

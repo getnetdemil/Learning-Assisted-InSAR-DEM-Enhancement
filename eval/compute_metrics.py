@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -268,6 +269,23 @@ def _load_phase(pair_dir: Path, method: str) -> Optional[np.ndarray]:
             re = src.read(1).astype(np.float32)
             im = src.read(2).astype(np.float32)
         return np.arctan2(im, re)
+    except Exception as e:
+        log.warning("Could not load %s: %s", path, e)
+        return None
+
+
+def _load_complex_mean(pair_dir: Path, method: str) -> Optional[tuple]:
+    """Return (mean_Re, mean_Im) for the interferogram — used for vector-mean phase."""
+    import rasterio
+    fname = "ifg_goldstein.tif" if method == "goldstein" else "ifg_film_unet.tif"
+    path = pair_dir / fname
+    if not path.exists():
+        return None
+    try:
+        with rasterio.open(path) as src:
+            re = src.read(1).astype(np.float32)
+            im = src.read(2).astype(np.float32)
+        return float(np.nanmean(re)), float(np.nanmean(im))
     except Exception as e:
         log.warning("Could not load %s: %s", path, e)
         return None
@@ -515,12 +533,13 @@ def compute_temporal_residual(
     weights_list: list[float] = []
 
     for pd_dir in pair_dirs:
-        phi = _load_phase(pd_dir, method)
-        if phi is None and fallback_method is not None:
-            phi = _load_phase(pd_dir, fallback_method)
-        if phi is None:
+        cplx = _load_complex_mean(pd_dir, method)
+        if cplx is None and fallback_method is not None:
+            cplx = _load_complex_mean(pd_dir, fallback_method)
+        if cplx is None:
             continue
-        obs_list.append(float(np.nanmean(phi)))
+        mean_re, mean_im = cplx
+        obs_list.append(float(np.arctan2(mean_im, mean_re)))  # vector mean phase
         valid_dirs.append(pd_dir)
 
         if method == "film_unet":
@@ -556,6 +575,7 @@ def compute_temporal_residual(
 
     phi_stack = np.array(obs_list, dtype=np.float32).reshape(-1, 1)
     weights   = np.array(weights_list, dtype=np.float32)
+    weights   = weights / weights.mean()   # prevent scale inflation
 
     try:
         return temporal_consistency_residual(phi_stack, A, weights)
@@ -758,6 +778,18 @@ def main() -> None:
     fig_dir = out_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
 
+    # ── Timestamp-based eval tag ────────────────────────────────────────────
+    eval_ts    = datetime.now().strftime('%Y%m%d_%H%M')
+    chkpt_stem = Path(args.checkpoint).stem   # e.g. "raw2gold_20260319_2139_final"
+    eval_tag   = f"eval_{chkpt_stem}_{eval_ts}"
+
+    log_path = Path("logs") / f"{eval_tag}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logging.getLogger().addHandler(file_handler)
+    log.info("Eval tag: %s | Log: %s", eval_tag, log_path)
+
     device = torch.device(
         args.device if args.device else ("cuda" if torch.cuda.is_available() else "cpu")
     )
@@ -926,7 +958,7 @@ def main() -> None:
                    else (m - g) * 100
         rows.append({"metric": labels[key], "method": "improvement_pct", "value": impv})
 
-    csv_path = out_dir / "metrics_comparison.csv"
+    csv_path = out_dir / f"metrics_{eval_tag}.csv"
     pd.DataFrame(rows).to_csv(csv_path, index=False)
     log.info("Saved %s", csv_path)
 
@@ -934,20 +966,21 @@ def main() -> None:
     _save_closure_histogram(
         gold_errors_list,
         model_errors_list,
-        fig_dir / "closure_histogram.png",
+        fig_dir / f"{eval_tag}_closure_histogram.png",
     )
-    _save_phase_comparison(eval_pairs, fig_dir / "phase_comparison.png")
+    _save_phase_comparison(eval_pairs, fig_dir / f"{eval_tag}_phase_comparison.png")
     _save_temporal_residual_bar(
         gold_temporal,
         model_temporal,
-        fig_dir / "temporal_residual_bar.png",
+        fig_dir / f"{eval_tag}_temporal_residual_bar.png",
     )
 
     print(f"Outputs written to: {out_dir}/")
-    print(f"  metrics_comparison.csv")
-    print(f"  figures/closure_histogram.png")
-    print(f"  figures/phase_comparison.png")
-    print(f"  figures/temporal_residual_bar.png")
+    print(f"  metrics_{eval_tag}.csv")
+    print(f"  figures/{eval_tag}_closure_histogram.png")
+    print(f"  figures/{eval_tag}_phase_comparison.png")
+    print(f"  figures/{eval_tag}_temporal_residual_bar.png")
+    print(f"  logs/{eval_tag}.log")
 
 
 if __name__ == "__main__":

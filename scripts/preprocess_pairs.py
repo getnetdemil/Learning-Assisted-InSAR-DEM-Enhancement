@@ -95,7 +95,7 @@ def estimate_offset_cc(
     ref: np.ndarray,
     sec: np.ndarray,
     upsample_factor: int = 10,
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     """
     Estimate (row_offset, col_offset) to align `sec` to `ref` via
     phase cross-correlation in the frequency domain.
@@ -109,7 +109,8 @@ def estimate_offset_cc(
 
     Returns
     -------
-    (row_offset, col_offset) : floats   shift to apply to sec to align to ref
+    (row_offset, col_offset, cc_peak_score) : floats
+        shift to apply to sec to align to ref; cc_peak_score ∈ [0,1]
     """
     # Use intensity images for cross-correlation (more stable than phase)
     ref_int = np.abs(ref).astype(np.float32)
@@ -129,16 +130,20 @@ def estimate_offset_cc(
     peak_flat = np.argmax(cc)
     r_peak, c_peak = np.unravel_index(peak_flat, (rows, cols))
 
+    # CC quality score: peak / max → always [0, 1]
+    cc_max = float(cc.max())
+    cc_peak_score = float(cc[r_peak, c_peak] / cc_max) if cc_max > 0 else 0.0
+
     # Wrap offsets to (-N/2, N/2)
     r_off = r_peak if r_peak < rows // 2 else r_peak - rows
     c_off = c_peak if c_peak < cols // 2 else c_peak - cols
 
     if upsample_factor <= 1:
-        return float(r_off), float(c_off)
+        return float(r_off), float(c_off), cc_peak_score
 
     # Sub-pixel refinement via DFT upsampling in a small neighbourhood
     r_off_sub, c_off_sub = _subpixel_offset(R, r_off, c_off, upsample_factor)
-    return r_off_sub, c_off_sub
+    return r_off_sub, c_off_sub, cc_peak_score
 
 
 def _subpixel_offset(
@@ -192,6 +197,132 @@ def apply_shift(
     phase_ramp = np.exp(-2j * np.pi * (row_off * fr + col_off * fc))
     shifted = np.fft.ifft2(np.fft.fft2(slc) * phase_ramp)
     return shifted.astype(slc.dtype)
+
+
+def estimate_offset_grid(
+    ref: np.ndarray,
+    sec: np.ndarray,
+    n_grid: int = 3,
+    patch_frac: float = 0.15,
+    upsample_factor: int = 10,
+    min_cc_score: float = 0.05,
+) -> dict:
+    """
+    Estimate coregistration offset from a n_grid × n_grid regular patch grid.
+
+    Patches are placed at evenly-spaced positions across the image (avoiding
+    the first and last 20% of each axis).  Each patch contributes an
+    independent (row_off, col_off, cc_score) estimate.  The returned offset
+    is the CC-score-weighted mean over accepted patches.
+
+    Parameters
+    ----------
+    ref, sec        : 2-D complex arrays (same shape)
+    n_grid          : grid dimension (default 3 → 9 patches)
+    patch_frac      : patch side = max(H,W) * patch_frac (default 0.15 → ~614 px for 4096)
+    min_cc_score    : patches below this CC score are excluded from the mean
+
+    Returns
+    -------
+    dict with keys:
+        row_offset_px           float  weighted-mean row shift
+        col_offset_px           float  weighted-mean col shift
+        cc_peak_mean            float  mean CC score of accepted patches
+        cc_peak_min             float  min  CC score of accepted patches
+        n_patches_ok            int    number of patches above min_cc_score
+        offset_row_std          float  std of row offsets across patches (px)
+        offset_col_std          float  std of col offsets across patches (px)
+        estimated_rotation_mrad float  rotation from affine fit (informational only)
+    """
+    H, W = ref.shape
+    patch_size = max(64, int(max(H, W) * patch_frac))
+
+    # Grid centres at evenly-spaced positions, avoiding the outer 20% of each axis
+    row_frac = np.linspace(0.2, 0.8, n_grid)
+    col_frac = np.linspace(0.2, 0.8, n_grid)
+
+    offsets_r, offsets_c, scores = [], [], []
+    cx_list, cy_list = [], []  # patch centre positions (for affine rotation fit)
+
+    for rf in row_frac:
+        for cf in col_frac:
+            r0 = int(rf * H) - patch_size // 2
+            c0 = int(cf * W) - patch_size // 2
+            r0 = max(0, min(r0, H - patch_size))
+            c0 = max(0, min(c0, W - patch_size))
+            r1, c1 = r0 + patch_size, c0 + patch_size
+
+            patch_r = ref[r0:r1, c0:c1]
+            patch_s = sec[r0:r1, c0:c1]
+
+            try:
+                dr, dc, score = estimate_offset_cc(patch_r, patch_s, upsample_factor)
+            except Exception:
+                continue
+
+            offsets_r.append(dr)
+            offsets_c.append(dc)
+            scores.append(score)
+            cx_list.append(cf * W)
+            cy_list.append(rf * H)
+
+    if not offsets_r:
+        # Fallback to centre patch
+        dr, dc, score = estimate_offset_cc(ref, sec, upsample_factor)
+        return {
+            "row_offset_px": dr, "col_offset_px": dc,
+            "cc_peak_mean": score, "cc_peak_min": score,
+            "n_patches_ok": 1, "offset_row_std": 0.0, "offset_col_std": 0.0,
+            "estimated_rotation_mrad": 0.0,
+        }
+
+    offsets_r = np.array(offsets_r)
+    offsets_c = np.array(offsets_c)
+    scores    = np.array(scores)
+
+    # Filter by min CC score
+    ok = scores >= min_cc_score
+    if ok.sum() == 0:
+        ok = np.ones(len(scores), dtype=bool)  # accept all if none pass threshold
+
+    offsets_r_ok = offsets_r[ok]
+    offsets_c_ok = offsets_c[ok]
+    scores_ok    = scores[ok]
+    cx_ok        = np.array(cx_list)[ok]
+    cy_ok        = np.array(cy_list)[ok]
+
+    # CC-score-weighted mean offset
+    w = scores_ok / scores_ok.sum()
+    mean_dr = float((w * offsets_r_ok).sum())
+    mean_dc = float((w * offsets_c_ok).sum())
+
+    # Consistency: std of offsets (near 0 for pure translation / flat terrain)
+    std_r = float(offsets_r_ok.std()) if len(offsets_r_ok) > 1 else 0.0
+    std_c = float(offsets_c_ok.std()) if len(offsets_c_ok) > 1 else 0.0
+
+    # Affine rotation estimate (informational only — NOT applied):
+    # Fit dr = a0 + a1*cx + a2*cy; dc = b0 + b1*cx + b2*cy
+    # rotation ≈ (a2 - b1) / 2 [rad/px] → mrad/1000px
+    rotation_mrad = 0.0
+    if len(offsets_r_ok) >= 3:
+        try:
+            A_fit = np.column_stack([np.ones(len(cx_ok)), cx_ok, cy_ok])
+            coef_r, _, _, _ = np.linalg.lstsq(A_fit, offsets_r_ok, rcond=None)
+            coef_c, _, _, _ = np.linalg.lstsq(A_fit, offsets_c_ok, rcond=None)
+            rotation_mrad = float((coef_r[2] - coef_c[1]) / 2 * 1000)
+        except Exception:
+            pass
+
+    return {
+        "row_offset_px":            mean_dr,
+        "col_offset_px":            mean_dc,
+        "cc_peak_mean":             float(scores_ok.mean()),
+        "cc_peak_min":              float(scores_ok.min()),
+        "n_patches_ok":             int(ok.sum()),
+        "offset_row_std":           std_r,
+        "offset_col_std":           std_c,
+        "estimated_rotation_mrad":  rotation_mrad,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +411,7 @@ def process_pair(
     looks_azimuth: int,
     goldstein_alpha: float,
     use_adaptive: bool,
+    coreg_n_grid: int = 3,
 ) -> dict:
     """
     Process one interferometric pair end-to-end.
@@ -324,9 +456,21 @@ def process_pair(
         return {"ok": False, "error": f"Read error: {e}"}
 
     # --- Coregistration ---
+    coreg_stats: dict = {}
+    dr, dc = 0.0, 0.0
     try:
-        dr, dc = estimate_offset_cc(slc_ref, slc_sec, upsample_factor=10)
-        log.debug("  Coregistration offset: dr=%.3f dc=%.3f px", dr, dc)
+        result = estimate_offset_grid(slc_ref, slc_sec, n_grid=coreg_n_grid, upsample_factor=10)
+        dr = result["row_offset_px"]
+        dc = result["col_offset_px"]
+        coreg_stats = result
+        log.debug(
+            "  Coreg offset: dr=%.3f dc=%.3f px | cc_mean=%.3f cc_min=%.3f n=%d "
+            "std_r=%.3f std_c=%.3f rot=%.2f mrad",
+            dr, dc,
+            result["cc_peak_mean"], result["cc_peak_min"], result["n_patches_ok"],
+            result["offset_row_std"], result["offset_col_std"],
+            result["estimated_rotation_mrad"],
+        )
         slc_sec_coreg = apply_shift(slc_sec, dr, dc)
     except Exception as e:
         log.warning("Coregistration failed for %s/%s: %s", id_ref[:30], id_sec[:30], e)
@@ -369,17 +513,23 @@ def process_pair(
     import json
     with open(pair_dir / "coreg_meta.json", "w") as f:
         json.dump({
-            "id_ref": id_ref,
-            "id_sec": id_sec,
-            "dt_days": float(row.get("dt_days", 0)),
-            "dinc_deg": float(row.get("dinc_deg", 0)),
-            "q_score": float(row.get("q_score", 0)),
-            "bperp_m": float(row.get("bperp_m", 0)) if "bperp_m" in row.index else None,
-            "row_offset_px": dr,
-            "col_offset_px": dc,
-            "patch_size": ps,
-            "patch_row_ref": row_r,
-            "patch_col_ref": col_r,
+            "id_ref":              id_ref,
+            "id_sec":              id_sec,
+            "dt_days":             float(row.get("dt_days", 0)),
+            "dinc_deg":            float(row.get("dinc_deg", 0)),
+            "q_score":             float(row.get("q_score", 0)),
+            "bperp_m":             float(row.get("bperp_m", 0)) if "bperp_m" in row.index else None,
+            "row_offset_px":       dr,
+            "col_offset_px":       dc,
+            "patch_size":          ps,
+            "patch_row_ref":       row_r,
+            "patch_col_ref":       col_r,
+            # Coregistration quality metrics (multi-patch grid)
+            "cc_peak_mean":        coreg_stats.get("cc_peak_mean",  None),
+            "cc_peak_min":         coreg_stats.get("cc_peak_min",   None),
+            "n_coreg_patches":     coreg_stats.get("n_patches_ok",  None),
+            "offset_row_std_px":   coreg_stats.get("offset_row_std", None),
+            "offset_col_std_px":   coreg_stats.get("offset_col_std", None),
         }, f, indent=2)
 
     return {"ok": True, "pair_dir": str(pair_dir), "mean_coherence": float(coherence.mean())}
@@ -395,7 +545,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--raw_dir", required=True, help="Root dir with per-collect subdirs")
     p.add_argument("--out_dir", required=True, help="Output directory for processed pairs")
     p.add_argument("--max_pairs", type=int, default=None, help="Max pairs to process")
-    p.add_argument("--dt_max", type=float, default=60.0, help="Max Δt filter (days)")
+    p.add_argument("--dt_max", type=float, default=7.0, help="Max Δt filter (days)")
+    p.add_argument("--coreg_n_grid", type=int, default=3,
+                   help="Grid dimension for multi-patch coregistration (default 3 = 3×3=9 patches). "
+                        "Set 1 to use single centre patch (legacy).")
     p.add_argument("--dinc_max", type=float, default=2.0, help="Max Δinc filter (deg)")
     p.add_argument("--patch_size", type=int, default=4096, help="SLC patch size (pixels)")
     p.add_argument("--looks_range", type=int, default=5, help="Range looks for coherence")
@@ -439,6 +592,7 @@ def main() -> None:
             looks_azimuth=args.looks_azimuth,
             goldstein_alpha=args.goldstein_alpha,
             use_adaptive=args.adaptive,
+            coreg_n_grid=args.coreg_n_grid,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.n_workers) as ex:

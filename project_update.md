@@ -125,6 +125,19 @@ Given unwrapped phase φ_unw and known B_perp:
 ```
 
 For pure DEM estimation (no deformation), pairs with short temporal baselines
+Total pairs in manifest: 8834
+
+       dt <=   3 days:   192 pairs (2.2%)
+Processed pairs: 224
+       dt <=   5 days:  100 (44.6%)
+       dt <=   7 days:  224 (100.0%)
+       dt <=  10 days:  224 (100.0%)
+       dt <=  14 days:  224 (100.0%)
+       dt <=  21 days:  224 (100.0%)
+       dt <=  30 days:  224 (100.0%)
+       dt <=  60 days:  224 (100.0%)
+       mean dt: 4.6 days, median: 5.9 days
+Excellent result. All 224 already-processed pairs have dt ≤ 7 days (mean 4.6 days, median 5.9 days) — the q_score naturally selected short-baseline pairs first. 
 (Δt < 15 days) minimise the deformation and atmospheric terms.
 
 **Multi-temporal stacking (SBAS — Small Baseline Subset)** greatly improves accuracy:
@@ -1042,36 +1055,73 @@ Figures already copied: `closure_histogram.png`, `phase_comparison.png`,
 
 ---
 
+### Session 7 — 2026-03-21: Eval Results, Two Bugs Diagnosed, Fixes Planned
+
+**Training `raw2gold_30ep` completed** (epoch 30/30):
+- train_loss=−0.532, val_loss=−0.461 (converged, NaN fix confirmed working)
+- Checkpoint: `experiments/enhanced/checkpoints/film_unet/raw2gold_30ep/final.pt`
+
+**Full eval run** (224 pairs, all 5 metrics, with SNAPHU results):
+
+| Metric | Goldstein | FiLMUNet | |
+|--------|-----------|----------|-|
+| M1 Triplet Closure | 1.018 rad | 1.021 rad | No improvement |
+| M2 Unwrap Success Rate | 0.256 | N/A | SNAPHU not re-run on denoised output |
+| M3 Usable Pairs | 0.000 | 0.000 | Closure still > 0.5 threshold |
+| M5 Temporal Residual | 0.050 rad | 2.977 rad | +5827% (BUG — see below) |
+
+**Bug 1 — M5 computation (eval bug, not model bug):**
+`compute_temporal_residual()` used `np.nanmean(arctan2(Im, Re))` — arithmetic mean
+of wrapped phase angles — as the SBAS observation per pair. For Goldstein (smooth,
+high-coherence output) this approximation is stable. For FiLMUNet, Hanning
+overlap-add in `run_inference_on_pair()` produces near-zero Re/Im at image edges;
+`atan2(~0, ~0)` yields random phases that corrupt the spatial mean.
+Fix: replace with vector mean `arctan2(nanmean(Im_raw), nanmean(Re_raw))`, which
+is the phase of the mean complex phasor — the correct circular statistic.
+
+**Bug 2 — Closure loss never active (training bug):**
+`val_closure=0.0000` throughout all 30 epochs because `PhysicsLossInputs.phi_ij`,
+`phi_jk`, `phi_ik` are always `None` in `run_epoch()`. The `InSARTileDataset`
+loads single-pair tiles; triplet structure is never passed to the loss. The
+`closure_loss()` function in `physics_losses.py` gates on `inp.phi_ij is not None`
+and returns 0.0 when not set. Similarly temporal loss also never computed.
+Fix: add `TripletTileDataset` (loads tiles from all 3 pairs of a triplet at same
+spatial position) and dual-loader training where every main N2N batch is paired
+with a triplet batch for closure loss.
+
+**New naming convention** (applied in this session):
+- Checkpoints: `{run_name}_{YYYYMMDD_HHMM}_final.pt` (e.g. `raw2gold_20260319_2139_final.pt`)
+- Eval outputs: `metrics_{chkpt_stem}_{YYYYMMDD_HHMM}.csv`
+- Log files: auto-saved by script as `logs/{run_tag}.log` (companion to checkpoint)
+
+---
+
 ## 11. Remaining Work
 
 ### 11.1 Critical Path (Before Contest Submission, April 06)
 
 | Task | Priority | Status |
 |------|----------|--------|
-| Fix NaN loss (clamp log_var) | CRITICAL | **DONE (2026-03-19)** |
-| Retrain 30ep (raw2gold, PID 3618843) | CRITICAL | **IN PROGRESS (ETA Mar 19 ~21:00)** |
-| SNAPHU unwrapping 224 pairs | CRITICAL | **IN PROGRESS (70/224, ETA Mar 21)** |
-| Re-eval with fixed model (M1, M5) | CRITICAL | Pending (after retraining) |
-| Ablations V1–V5 (20 ep each) | HIGH | Pending (after retraining) |
-| Full eval M2/M3 (after SNAPHU) | HIGH | Pending (after SNAPHU ~Mar 21) |
-| Zero-shot transfer AOI_008 (LA) | MEDIUM | Pending (~Mar 25) |
-| Fill paper `[XX]` placeholders | CRITICAL | Pending (after eval + ablations) |
-| Final review + REPRODUCIBILITY.md checksums | HIGH | Pending (~Apr 1–5) |
+| Fix M5 vector mean in compute_metrics.py | CRITICAL | PLANNED |
+| Add TripletTileDataset + closure loss training | CRITICAL | PLANNED |
+| Retrain with closure loss active (30–50 ep) | CRITICAL | PENDING (after fix) |
+| Re-eval with fixed M5 + new checkpoint | CRITICAL | PENDING (after retrain) |
+| Ablations V1–V5 (with closure fix) | HIGH | PENDING (after retrain) |
+| Zero-shot transfer AOI_008 | MEDIUM | PENDING |
+| Fill paper [XX] placeholders | CRITICAL | PENDING (after eval) |
 | Submit | CRITICAL | April 06, 2026 |
 
 ### 11.2 Remaining Timeline
 
 | Date | Milestone |
 |------|-----------|
-| **Mar 19 (today)** | NaN fix done; training restarted (PID 3618843) |
-| **Mar 19 ~21:00** | Training done → run eval (Step 3): check M1 < 1.018 rad |
-| **Mar 20** | Eval results → start ablations V1–V5 |
-| **Mar 21** | SNAPHU done → full eval M2/M3 |
-| **Mar 22–23** | Ablations done → collect_ablation_results.py → Table 2 |
-| **Mar 25** | Zero-shot transfer AOI_008 → LA numbers |
-| **Mar 26–29** | Fill all `[XX]` in paper, write missing prose |
-| **Apr 1–5** | Final review + REPRODUCIBILITY.md checksums |
-| **Apr 6** | **SUBMIT** |
+| **Mar 21 (today)** | Apply M5 fix + closure fix + retrain |
+| **Mar 22–23** | Retrain ~10h → re-eval (Steps 3+4 combined) |
+| **Mar 24–25** | Ablations V1–V5 (parallel, 20 ep each) |
+| **Mar 26** | Zero-shot transfer AOI_008 |
+| **Mar 27–29** | Fill all [XX] in paper |
+| **Apr 1–5** | Final review + REPRODUCIBILITY.md |
+| **Apr 6** | SUBMIT |
 
 ---
 
@@ -1096,8 +1146,24 @@ Figures already copied: `closure_histogram.png`, `phase_comparison.png`,
 | `scripts/run_ablations.sh` | 3 | **DONE** | V1–V5, ready to run |
 | `scripts/collect_ablation_results.py` | 3 | **DONE** | aggregates → Markdown table |
 | `eval/zero_shot_transfer.py` | 3 | **DONE** | AOI_008 pipeline, not yet run |
+| `scripts/assess_coreg_quality.py` | 3 | **DONE** | retroactive quality metrics, < 5 min for 224 pairs |
 | `REPRODUCIBILITY.md` | 4 | **DONE** | real checksums; needs final update |
 | `Latex_Paper_Temporal_SAR_Change/main.tex` | 4 | IN PROGRESS | `[XX]` placeholders for eval data |
+
+---
+
+### 11.3 Parameter Decisions (2026-03-21)
+
+- **Formal `dt_max` changed to 7 days** (was 60): all 224 already-processed pairs already
+  satisfy dt ≤ 7 d (q_score selection naturally picked short-baseline pairs). The 7-day
+  cutoff formalises this and applies automatically for any future pair additions.
+  Full manifest still uses dt_max=365 for `build_pair_graph()`; only `enumerate_triplets()`
+  and `preprocess_pairs.py` use the 7-day filter.
+- **Multi-patch coregistration** (`--coreg_n_grid 3`): new default in `preprocess_pairs.py`.
+  Uses a 3×3 = 9-patch grid instead of a single centre patch. Returns CC-score-weighted mean
+  offset + 5 quality metrics saved to `coreg_meta.json`:
+  `cc_peak_mean`, `cc_peak_min`, `n_coreg_patches`, `offset_row_std_px`, `offset_col_std_px`.
+  Rotation estimation (informational only) logged to console, not saved.
 
 ---
 

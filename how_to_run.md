@@ -21,6 +21,7 @@ Step 2  src/insar_processing/pair_graph.py    Build pair graph + compute B_perp 
 Step 3  scripts/preprocess_pairs.py           Coregistration → interferogram → Goldstein filter
 Step 4  scripts/select_triplet_completing_pairs.py   Find pairs needed to close triplets
 Step 4b scripts/patch_coreg_meta.py           Add FiLM metadata fields to coreg_meta.json
+Step 4c scripts/assess_coreg_quality.py       Retroactive quality metrics from processed pairs
 Step 5  scripts/unwrap_snaphu.py              Phase unwrapping with SNAPHU
 Step 6  experiments/enhanced/train_film_unet.py      Train FiLMUNet (self-supervised)
 Step 7  eval/compute_metrics.py               All 5 contest metrics vs baseline
@@ -114,8 +115,8 @@ hawaii = manifest[manifest.aoi == 'AOI_000']
 pairs_df = build_pair_graph(hawaii, dt_max=365, dinc_max=5.0)
 pairs_df.to_parquet('data/manifests/hawaii_pairs.parquet', index=False)
 
-# Enumerate strict triplets: Δt ≤ 60 days, Δinc ≤ 2°
-triplets_df = enumerate_triplets(pairs_df, dt_max=60, dinc_max=2.0)
+# Enumerate strict triplets: Δt ≤ 7 days, Δinc ≤ 2°
+triplets_df = enumerate_triplets(pairs_df, dt_max=7, dinc_max=2.0)
 triplets_df.to_parquet('data/manifests/hawaii_triplets_strict.parquet', index=False)
 
 print(f'{len(pairs_df)} pairs, {len(triplets_df)} triplets')
@@ -126,7 +127,9 @@ print(f'{len(pairs_df)} pairs, {len(triplets_df)} triplets')
 - `data/manifests/hawaii_pairs.parquet` — columns: `id_ref`, `id_sec`, `datetime_ref`, `datetime_sec`, `dt_days`, `dinc_deg`, `orbit_state`, `look_direction`, `incidence_ref`, `incidence_sec`, `q_score`, `aoi`, `bperp_m`
 - `data/manifests/hawaii_triplets_strict.parquet` — columns: `id_a`, `id_b`, `id_c`
 
-**Current status**: DONE — 8,834 pairs, 24,171 triplets.
+**Current status**: DONE — 8,834 pairs, 24,171 triplets (full manifest at dt_max=60).
+For training, only pairs with dt ≤ 7 days are used: 373 pairs, ~800 triplets.
+All 224 already-processed pairs satisfy dt ≤ 7 days (no reprocessing needed).
 
 ---
 
@@ -194,13 +197,14 @@ py scripts/preprocess_pairs.py \
 | `--raw_dir` | required | Root dir with per-collect SLC subdirectories |
 | `--out_dir` | required | Output directory for processed pairs |
 | `--max_pairs` | — | Cap number of pairs to process (rows 0..N after filter) |
-| `--dt_max` | 60.0 | Max temporal baseline filter (days) |
+| `--dt_max` | 7.0 | Max temporal baseline filter (days) |
 | `--dinc_max` | 2.0 | Max incidence angle difference filter (degrees) |
 | `--patch_size` | 4096 | SLC patch size in pixels (square) |
 | `--looks_range` | 5 | Range looks for coherence window |
 | `--looks_azimuth` | 5 | Azimuth looks for coherence window |
 | `--goldstein_alpha` | 0.5 | Goldstein filter strength α ∈ [0,1] (used when `--adaptive` is off) |
 | `--adaptive` | off | Use coherence-adaptive α (stronger in low-coherence regions) |
+| `--coreg_n_grid` | 3 | Grid dimension for multi-patch coregistration (3 = 3×3=9 patches; 1 = single centre patch) |
 | `--n_workers` | 4 | Parallel worker threads |
 
 **Output per pair** in `data/processed/pairs/<id_ref>__<id_sec>/`:
@@ -210,7 +214,7 @@ py scripts/preprocess_pairs.py \
 | `ifg_raw.tif` | 2-band float32 GeoTIFF | Re, Im of unnormalised interferogram |
 | `ifg_goldstein.tif` | 2-band float32 GeoTIFF | Goldstein-filtered Re, Im |
 | `coherence.tif` | 1-band float32 GeoTIFF | Coherence values ∈ [0,1] |
-| `coreg_meta.json` | JSON | `id_ref`, `id_sec`, `dt_days`, `dinc_deg`, `q_score`, `bperp_m`, `row_offset_px`, `col_offset_px`, `patch_size`, `patch_row_ref`, `patch_col_ref`, `incidence_angle_deg`, `mode`, `look_direction`, `snr_proxy` (last 4 added by Step 4b) |
+| `coreg_meta.json` | JSON | `id_ref`, `id_sec`, `dt_days`, `dinc_deg`, `q_score`, `bperp_m`, `row_offset_px`, `col_offset_px`, `patch_size`, `patch_row_ref`, `patch_col_ref`, `cc_peak_mean`, `cc_peak_min`, `n_coreg_patches`, `offset_row_std_px`, `offset_col_std_px`, `incidence_angle_deg`, `mode`, `look_direction`, `snr_proxy` (last 4 added by Step 4b) |
 
 **Performance**: ~17 min for 62 pairs with 4 workers on a 4096×4096 patch size.
 
@@ -313,6 +317,38 @@ Patched 224 / 224 coreg_meta.json files (0 not in manifest)
 
 ---
 
+## Step 4c — Retroactive Coregistration Quality Assessment
+
+**Script**: `scripts/assess_coreg_quality.py`
+
+**Purpose**: Estimates coregistration quality metrics for all already-processed pairs without re-running coregistration. Reads `ifg_goldstein.tif` + `coherence.tif` from each pair directory and computes:
+- `mean_coherence` — average coherence across the full patch
+- `coherence_p10` — 10th percentile coherence (flags poorly-coregistered pairs)
+- `phase_spatial_std` — std of wrapped phase over coherent pixels (proxy for fringe density vs. noise)
+- `cc_peak_mean` / `n_coreg_patches` — copied from `coreg_meta.json` if present
+
+Takes < 5 min for 224 pairs.
+
+```bash
+py scripts/assess_coreg_quality.py \
+    --pairs_dir data/processed/pairs \
+    --out_csv   data/manifests/coreg_quality.csv
+```
+
+**All flags**:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--pairs_dir` | required | Root directory containing per-pair subdirectories |
+| `--out_csv` | `data/manifests/coreg_quality.csv` | Output CSV path |
+| `--coh_flag_threshold` | 0.15 | Flag pairs with mean_coherence below this value |
+
+**Output**: `data/manifests/coreg_quality.csv` — one row per pair with quality metrics and `flag_low_coherence` boolean column.
+
+**Current status**: Available for use. New pairs processed with `--coreg_n_grid 3` will also have `cc_peak_mean`, `cc_peak_min`, `n_coreg_patches`, `offset_row_std_px`, `offset_col_std_px` in their `coreg_meta.json`.
+
+---
+
 ## Step 5 — Phase Unwrapping with SNAPHU
 
 **Script**: `scripts/unwrap_snaphu.py`
@@ -379,7 +415,9 @@ $DIRECT_PY -u scripts/unwrap_snaphu.py \
 
 **Output per pair**: `unw_phase.tif` — float32 GeoTIFF, unwrapped phase in radians, NaN at masked/incoherent pixels.
 
-**Current status**: RUNNING — snaphu-py 0.4.1 installed; 224 pairs being unwrapped (4 workers, started 13:15 Mar 18, ETA ~9 AM Mar 19).
+**Current status**: DONE — 224/224 pairs unwrapped (`unw_phase.tif` in all pair dirs).
+Critical fix applied (2026-03-18): pairs ≥4096 px use `ntiles=(4,4)` (not `(2,2)`) to
+avoid "Exceeded maximum secondary arcs" error. Unwrap success rate (Goldstein) = 0.256.
 
 ---
 
@@ -394,20 +432,55 @@ Three YAML configs control all behaviour:
 - `configs/model/film_unet.yaml` — architecture (features, embed_dim, metadata_dim)
 - `configs/train/contest.yaml` — learning rate, epochs, batch size, loss weights
 
-```bash
-# Fresh training run:
-py experiments/enhanced/train_film_unet.py \
-    --data_config  configs/data/capella_aoi_selection.yaml \
-    --model_config configs/model/film_unet.yaml \
-    --train_config configs/train/contest.yaml
 
-# Resume from a saved checkpoint (continues from the saved epoch):
+# This is how to run the training (foreground in the terminal)
+```bash
+export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH
+conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output \
+env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement \
+LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib \
+python experiments/enhanced/train_film_unet.py \
+  --data_config configs/data/capella_aoi_selection.yaml \
+  --model_config configs/model/film_unet.yaml \
+  --train_config configs/train/contest.yaml \
+  --run_name raw2gold_closure \
+  --triplets_manifest data/manifests/hawaii_triplets_strict.parquet
+```
+```bash
+# Fresh training run (timestamp auto-applied to all output filenames):
 py experiments/enhanced/train_film_unet.py \
     --data_config  configs/data/capella_aoi_selection.yaml \
     --model_config configs/model/film_unet.yaml \
     --train_config configs/train/contest.yaml \
-    --resume experiments/enhanced/checkpoints/film_unet/epoch_020.pt
+    --run_name     raw2gold
+
+# With closure loss (requires triplets manifest):
+py experiments/enhanced/train_film_unet.py \
+    --data_config       configs/data/capella_aoi_selection.yaml \
+    --model_config      configs/model/film_unet.yaml \
+    --train_config      configs/train/contest.yaml \
+    --run_name          raw2gold_closure \
+    --triplets_manifest data/manifests/hawaii_triplets_strict.parquet
 ```
+
+# to compute the metrics
+```bash
+
+conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu
+     --no-capture-output \
+       env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement \
+           LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib \
+       python eval/compute_metrics.py \
+         --checkpoint
+     experiments/enhanced/checkpoints/film_unet/raw2gold_30ep/final.pt \
+         --pairs_dir data/processed/pairs \
+         --triplets_manifest data/manifests/hawaii_triplets_strict.parquet \
+         --out_dir experiments/enhanced/outputs \
+         --skip_snaphu_metrics \
+         --skip_inference \
+     > logs/eval_m5fix.log 2>&1
+```
+
 
 **All flags**:
 
@@ -417,6 +490,7 @@ py experiments/enhanced/train_film_unet.py \
 | `--model_config` | Path to model YAML (required) |
 | `--train_config` | Path to training YAML (required) |
 | `--resume` | Path to `.pt` checkpoint to resume from |
+| `--triplets_manifest` | — | Parquet of triplets; enables closure loss via TripletTileDataset |
 
 **Key config knobs** (edit the YAML files directly):
 
@@ -456,18 +530,23 @@ loss_weights:
   gradient: 0.1
 ```
 
-**Checkpoints** written to `experiments/enhanced/checkpoints/film_unet/`:
+**Checkpoints** written to `experiments/enhanced/checkpoints/film_unet/{run_tag}/`:
 
-| File | Saved when |
-|------|-----------|
-| `epoch_005.pt`, `epoch_010.pt`, … | Every 5 epochs |
-| `best_closure.pt` | Best validation closure loss |
-| `best_unwrap.pt` | Best validation unwrap loss (placeholder) |
-| `final.pt` | End of last epoch |
+| File pattern | Saved when |
+|---|---|
+| `{run_tag}_epoch_005.pt`, `_epoch_010.pt`, … | Every 5 epochs |
+| `{run_tag}_best_closure.pt` | Best validation closure loss |
+| `{run_tag}_final.pt` | End of last epoch |
+| `{run_tag}_training_summary.json` | End of training |
+| `logs/{run_tag}.log` | Live training log (same base name as checkpoint) |
+
+where `run_tag = {--run_name}_{YYYYMMDD_HHMM}` (timestamp auto-set at script start).
 
 Each checkpoint stores: model state dict, optimizer state, epoch number, all three config dicts, git commit hash.
 
-**Current status**: RUNNING — epoch 5/50 completed at 13:02 Mar 18; ETA ~9 AM Mar 19. `best_closure.pt` and `epoch_005.pt` written.
+**Current status**: Run `raw2gold_30ep_20260319_2139` complete (30/30 epochs).
+Closure loss was inactive (bug — see Session 7). Retrain with `--triplets_manifest`
+pending after fix is applied.
 
 ---
 
@@ -542,26 +621,29 @@ py eval/compute_metrics.py \
 | `--test_only` | off | Evaluate on the last `test_frac` pairs by date only |
 | `--device` | auto | PyTorch device string (`cuda`, `cpu`, `cuda:1`, …) |
 
-**Outputs** in `experiments/enhanced/outputs/`:
+**Outputs** in `{out_dir}/`:
 
-| File | Content |
-|------|---------|
-| `metrics_comparison.csv` | All 5 metrics × {goldstein, film_unet, improvement_pct} |
-| `figures/closure_histogram.png` | Distribution of per-triplet closure errors |
-| `figures/phase_comparison.png` | Side-by-side raw / Goldstein / FiLMUNet phase images |
-| `figures/temporal_residual_bar.png` | Bar chart of Metric 5 for both methods |
+| File pattern | Content |
+|---|---|
+| `metrics_{eval_tag}.csv` | All 5 metrics × {goldstein, film_unet, improvement_pct} |
+| `figures/{eval_tag}_closure_histogram.png` | Distribution of per-triplet closure errors |
+| `figures/{eval_tag}_phase_comparison.png` | Side-by-side raw / Goldstein / FiLMUNet phase |
+| `figures/{eval_tag}_temporal_residual_bar.png` | Bar chart of Metric 5 for both methods |
+| `logs/eval_{eval_tag}.log` | Full eval log (same timestamp as output files) |
 
-**Current metric values** (2026-03-18, `--skip_inference --skip_snaphu_metrics`, 162 pairs):
+where `eval_tag = eval_{checkpoint_stem}_{YYYYMMDD_HHMM}`.
 
-| Metric | Goldstein | FiLMUNet | Status |
-|--------|-----------|----------|--------|
-| M1 Triplet Closure Error | 1.018 rad | — (needs inference) | 62 triplets ✓ |
-| M2 Unwrap Success Rate | N/A | N/A | Needs SNAPHU |
-| M3 Usable Pairs Fraction | 0.000 | — | Needs inference |
-| M4 DEM NMAD | N/A | N/A | Needs ref DEM |
-| M5 Temporal Residual | 0.050 rad | — (needs inference) | P=162>T=138 ✓ |
+**Current metric values** (2026-03-21 full eval, 224 pairs, `raw2gold_30ep_20260319_2139_final.pt`):
 
-**Note**: M3=0.0 for Goldstein is correct — the raw closure error (1.018 rad) exceeds the 0.5 rad usable-pair gate. FiLMUNet inference is expected to reduce M1 below the gate threshold, yielding M3 > 0.
+| Metric | Goldstein | FiLMUNet | Notes |
+|--------|-----------|----------|-------|
+| M1 Triplet Closure | 1.018 rad | 1.021 rad | No improvement — closure loss inactive during training |
+| M2 Unwrap Success Rate | 0.256 | N/A | SNAPHU only run on Goldstein; needs re-run on denoised |
+| M3 Usable Pairs | 0.000 | 0.000 | M1 still > 0.5 gate |
+| M4 DEM NMAD | N/A | N/A | No reference DEM available |
+| M5 Temporal Residual | 0.050 rad | 2.977 rad | FiLMUNet value is INVALID — M5 bug being fixed |
+
+Pending: retrain with active closure loss → re-eval expected to show real M1/M5 improvement.
 
 ---
 
@@ -661,7 +743,7 @@ m = pd.read_parquet('data/manifests/full_index.parquet')
 hawaii = m[m.aoi == 'AOI_000']
 pairs_df = build_pair_graph(hawaii, dt_max=365, dinc_max=5.0)
 pairs_df.to_parquet('data/manifests/hawaii_pairs.parquet', index=False)
-triplets_df = enumerate_triplets(pairs_df, dt_max=60, dinc_max=2.0)
+triplets_df = enumerate_triplets(pairs_df, dt_max=7, dinc_max=2.0)
 triplets_df.to_parquet('data/manifests/hawaii_triplets_strict.parquet', index=False)
 "
 

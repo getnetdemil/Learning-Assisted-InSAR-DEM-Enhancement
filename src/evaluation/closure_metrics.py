@@ -203,8 +203,8 @@ def temporal_consistency_residual(
     Aw  = W @ A
     phw = W @ phi_stack
     x_star, *_ = np.linalg.lstsq(Aw, phw, rcond=None)
-    residual = phw - Aw @ x_star
-    return float(np.sqrt(np.mean(residual ** 2)))
+    raw_residual = phi_stack - A @ x_star   # unweighted, in radians
+    return float(np.sqrt(np.mean(raw_residual ** 2)))
 
 
 # ---------------------------------------------------------------------------
