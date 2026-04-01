@@ -28,12 +28,30 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import yaml
 from torch.utils.data import DataLoader, Dataset
+
+# Suppress rasterio georeference warning — training tiles are pixel-only (no CRS needed)
+try:
+    import rasterio.errors
+    warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
+except ImportError:
+    pass
+
+
+def _worker_init(worker_id: int) -> None:
+    """Suppress rasterio warnings in DataLoader worker processes."""
+    try:
+        import rasterio.errors
+        warnings.filterwarnings("ignore", category=rasterio.errors.NotGeoreferencedWarning)
+    except Exception:
+        pass
 
 # ── repo-relative import fix ──────────────────────────────────────────────────
 ROOT = Path(__file__).resolve().parents[2]
@@ -654,10 +672,10 @@ def main() -> None:
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=pin_memory,
-                              drop_last=True)
+                              drop_last=True, worker_init_fn=_worker_init)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                             num_workers=num_workers, pin_memory=pin_memory,
-                            drop_last=False)
+                            drop_last=False, worker_init_fn=_worker_init)
 
     # ── triplet loader (closure loss) ──
     triplet_loader = None
@@ -691,6 +709,7 @@ def main() -> None:
             tri_ds, batch_size=batch_size,
             shuffle=True, num_workers=num_workers,
             pin_memory=pin_memory, drop_last=True,
+            worker_init_fn=_worker_init,
         )
     elif args.triplets_manifest:
         log.warning("--triplets_manifest specified but not found: %s", args.triplets_manifest)
@@ -791,6 +810,7 @@ def main() -> None:
             f"Epoch {epoch+1:>3}/{num_epochs} | "
             f"train_loss={train_metrics.get('total', 0):.4f} "
             f"val_loss={val_metrics.get('total', 0):.4f} "
+            f"train_closure={train_metrics.get('closure', 0):.4f} "
             f"val_closure={val_metrics.get('closure', 0):.4f} "
             f"lr={current_lr:.2e}"
         )
@@ -801,15 +821,15 @@ def main() -> None:
                        **{f"train/{k}": v for k, v in train_metrics.items()},
                        **{f"val/{k}": v for k, v in val_metrics.items()}})
 
-        # Best-by-closure checkpoint
-        val_closure = val_metrics.get("closure", float("inf"))
-        if val_closure < best_closure:
-            best_closure = val_closure
+        # Best-by-closure checkpoint (use train_closure: val never has triplets)
+        train_closure = train_metrics.get("closure", float("inf"))
+        if train_closure < best_closure:
+            best_closure = train_closure
             save_checkpoint(
                 out_dir / f"{run_tag}_best_closure.pt", model, optimizer, epoch,
-                {"val_closure": val_closure}, all_configs,
+                {"train_closure": train_closure}, all_configs,
             )
-            print(f"  -> {run_tag}_best_closure.pt (closure={val_closure:.4f})")
+            print(f"  -> {run_tag}_best_closure.pt (closure={train_closure:.4f})")
 
         # Periodic checkpoint
         if (epoch + 1) % save_every == 0:
@@ -832,7 +852,7 @@ def main() -> None:
         "num_epochs": num_epochs,
         "zero_film": args.zero_film,
         "loss_weights": all_configs["train"]["loss_weights"],
-        "best_val_closure": best_closure,
+        "best_train_closure": best_closure,
         "final_val_metrics": val_metrics,
         "git_hash": git_hash(),
     }

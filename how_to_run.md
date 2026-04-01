@@ -462,6 +462,11 @@ py experiments/enhanced/train_film_unet.py \
     --run_name          raw2gold_closure \
     --triplets_manifest data/manifests/hawaii_triplets_strict.parquet
 ```
+# To run run SNAPHU on FiLMUNet
+
+```bash
+TASK_NAME="unwrap_film_unet" && DATE=$(date +%Y%m%d_%H%M%S) && LOG_FILE="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python -u scripts/unwrap_snaphu.py --pairs_dir data/processed/pairs --input_ifg ifg_film_unet.tif --output_name unw_phase_film_unet.tif --workers 4 | tee "$LOG_FILE"
+```
 
 # to compute the metrics
 ```bash
@@ -477,10 +482,12 @@ conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu
          --triplets_manifest data/manifests/hawaii_triplets_strict.parquet \
          --out_dir experiments/enhanced/outputs \
          --skip_snaphu_metrics \
-         --skip_inference \
+        #  --skip_inference \
      > logs/eval_m5fix.log 2>&1
 ```
-
+```bash
+MODEL_NAME="raw2gold_closure_20260321_1852_final" && DATE=$(date +%Y%m%d_%H%M%S) && LOG_FILE="logs/eval_${MODEL_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python eval/compute_metrics.py --checkpoint "experiments/enhanced/checkpoints/film_unet/raw2gold_closure_20260321_1852/${MODEL_NAME}.pt" --pairs_dir data/processed/pairs --triplets_manifest data/manifests/hawaii_triplets_strict.parquet --out_dir experiments/enhanced/outputs --force_inference | tee "$LOG_FILE"
+```
 
 **All flags**:
 
