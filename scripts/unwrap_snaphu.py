@@ -126,25 +126,27 @@ def process_pair(
     coh_mask_threshold: float = 0.1,
     nlooks: float = 9.0,
     nproc: int = 1,
+    input_ifg: str = "ifg_goldstein.tif",
+    output_name: str = "unw_phase.tif",
 ) -> Optional[Path]:
     """
     Unwrap one pair directory end-to-end.
 
     Steps
     -----
-    1. Load ifg_goldstein.tif (2-band Re/Im) → wrapped phase via arctan2
+    1. Load input_ifg (2-band Re/Im) → wrapped phase via arctan2
     2. Load coherence.tif
     3. Mask low-coherence pixels (set to 0) before unwrapping
     4. Run SNAPHU via snaphu-py Python API
     5. Set NaN where coherence < coh_mask_threshold or conncomp == 0
-    6. Save unw_phase.tif preserving CRS/transform from ifg_goldstein.tif
+    6. Save output_name preserving CRS/transform from input ifg
 
     Parameters
     ----------
     pair_dir : Path
-        Processed pair directory containing ifg_goldstein.tif, coherence.tif.
+        Processed pair directory containing the input interferogram and coherence.tif.
     out_dir : Path, optional
-        Where to save unw_phase.tif. Defaults to pair_dir.
+        Where to save the output file. Defaults to pair_dir.
     mode : str
         SNAPHU cost mode — 'DEFO' maps to 'smooth', 'TOPO' maps to 'smooth'
         (the snaphu-py API uses 'smooth'/'defo' keywords).
@@ -154,10 +156,14 @@ def process_pair(
         Equivalent number of independent looks.
     nproc : int
         Number of threads for tiled SNAPHU processing.
+    input_ifg : str
+        Filename of the 2-band Re/Im interferogram to unwrap (default: ifg_goldstein.tif).
+    output_name : str
+        Filename for the unwrapped phase output (default: unw_phase.tif).
 
     Returns
     -------
-    Path to unw_phase.tif on success, None on failure.
+    Path to output file on success, None on failure.
     """
     try:
         import rasterio
@@ -165,7 +171,7 @@ def process_pair(
         log.error("rasterio not available.")
         return None
 
-    ifg_path = pair_dir / "ifg_goldstein.tif"
+    ifg_path = pair_dir / input_ifg
     coh_path = pair_dir / "coherence.tif"
 
     if not ifg_path.exists() or not coh_path.exists():
@@ -209,10 +215,10 @@ def process_pair(
     unw[low_coh_mask] = float("nan")
     unw[conncomp == 0] = float("nan")
 
-    # --- Save unw_phase.tif ---
+    # --- Save output ---
     dest_dir = out_dir if out_dir is not None else pair_dir
     dest_dir.mkdir(parents=True, exist_ok=True)
-    out_path = dest_dir / "unw_phase.tif"
+    out_path = dest_dir / output_name
 
     out_profile = {
         "driver":     "GTiff",
@@ -265,6 +271,10 @@ def parse_args() -> argparse.Namespace:
                    help="Equivalent number of independent looks.")
     p.add_argument("--workers", type=int, default=2,
                    help="Number of parallel worker threads.")
+    p.add_argument("--input_ifg", default="ifg_goldstein.tif",
+                   help="Interferogram filename to unwrap (2-band Re/Im GeoTIFF).")
+    p.add_argument("--output_name", default="unw_phase.tif",
+                   help="Output filename for unwrapped phase.")
     return p.parse_args()
 
 
@@ -285,8 +295,8 @@ def main() -> None:
         raise SystemExit(1)
 
     pair_dirs = sorted(p for p in pairs_dir.iterdir() if p.is_dir())
-    # Skip already unwrapped pairs
-    pair_dirs = [d for d in pair_dirs if not (d / "unw_phase.tif").exists()]
+    # Skip pairs where the output file already exists
+    pair_dirs = [d for d in pair_dirs if not (d / args.output_name).exists()]
     log.info("Found %d pair directories to unwrap", len(pair_dirs))
 
     if args.max_pairs:
@@ -304,6 +314,8 @@ def main() -> None:
             mode=args.mode,
             coh_mask_threshold=args.coh_threshold,
             nlooks=args.nlooks,
+            input_ifg=args.input_ifg,
+            output_name=args.output_name,
         )
         return result is not None
 
