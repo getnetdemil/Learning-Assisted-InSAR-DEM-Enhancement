@@ -192,11 +192,28 @@ All metrics are implemented in `src/evaluation/closure_metrics.py`.
 
 ---
 
-## Baseline Results (Goldstein filter, 2026-03-17)
+## Final Submitted Results (2026-04-01)
 
-| Metric | Value | Notes |
-|--------|-------|-------|
-| M1 Triplet closure error | 1.018 rad | 62 complete triplets |
-| M5 Temporal residual | 0.050 rad | 162 pairs, 138 epochs |
-| M2/M3 | pending | Requires SNAPHU unwrapping |
-| M4 | N/A | No reference DEM available |
+**Checkpoint**: `experiments/enhanced/checkpoints/film_unet/raw2gold_closure_20260321_1852/raw2gold_closure_20260321_1852_final.pt`
+**SHA-256**: `2d021ac32039022992417484c07d3b5e960b5cb1969c43e0f740a071e95df672`
+
+Full eval log: `logs/eval_raw2gold_closure_20260321_1852_final_20260401_1155.log`
+
+| Metric | Goldstein | FiLMUNet | Δ |
+|--------|-----------|----------|---|
+| M1 Triplet Closure (rad) | 1.018 | 0.915 | −10.1% |
+| M2 Unwrap Success Rate | 0.256 | 0.258 | +0.2 pp |
+| M3 Usable Pairs Fraction | 0.000 | 0.000 | 0.0 pp |
+| M4 DEM NMAD (m) | 40.125 | 39.437 | −1.7% |
+| M5 Temporal Residual (rad) | 1.158 | 0.367 | −68.3% |
+
+**Note on M3**: All pairs fail the M1 < 0.5 rad gate — X-band spotlight over vegetated Hawaii terrain has systematically low coherence. M3 = 0 is reported honestly; it is not omitted.
+
+To reproduce with the final checkpoint:
+```bash
+PYTHONPATH=$(pwd) python eval/compute_metrics.py \
+    --checkpoint experiments/enhanced/checkpoints/film_unet/raw2gold_closure_20260321_1852/raw2gold_closure_20260321_1852_final.pt \
+    --pairs_dir data/processed/pairs \
+    --triplets_manifest data/manifests/hawaii_triplets_strict.parquet \
+    --copernicus_dem_dir data/reference/copernicus_dem
+```

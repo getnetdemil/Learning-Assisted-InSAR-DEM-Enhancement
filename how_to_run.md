@@ -101,22 +101,23 @@ py scripts/download_subset.py \
 
 **Module**: `src/insar_processing/pair_graph.py` (Python API, no standalone CLI)
 
-**Purpose**: Enumerate all valid interferometric pairs from the SLC manifest, score each by `Q_ij = 1/(Δt+1) × 1/(1+Δinc)`, compute perpendicular baseline `B_perp` from satellite state vectors, and enumerate all valid closure triplets (a→b, b→c, a→c) within temporal/incidence constraints.
+**Purpose**: Enumerate all valid interferometric pairs from the SLC manifest, score each by `Q_ij = 1/(Δt+1) × 1/(1+Δinc)`, and enumerate all valid closure triplets (a→b, b→c, a→c) within temporal/incidence constraints. Pairs with same orbit state and look direction only.
 
 ```bash
 py -c "
-from insar_processing.pair_graph import build_pair_graph, enumerate_triplets
+from src.insar_processing.pair_graph import PairGraphConfig, build_pair_graph, find_triplets
 import pandas as pd
 
 manifest = pd.read_parquet('data/manifests/full_index.parquet')
 hawaii = manifest[manifest.aoi == 'AOI_000']
 
 # Build pair graph: all pairs with Δt ≤ 365 days, Δinc ≤ 5°
-pairs_df = build_pair_graph(hawaii, dt_max=365, dinc_max=5.0)
+cfg = PairGraphConfig(dt_max_days=365, dinc_max_deg=5.0)
+pairs_df = build_pair_graph(hawaii, cfg)
 pairs_df.to_parquet('data/manifests/hawaii_pairs.parquet', index=False)
 
-# Enumerate strict triplets: Δt ≤ 7 days, Δinc ≤ 2°
-triplets_df = enumerate_triplets(pairs_df, dt_max=7, dinc_max=2.0)
+# Find all closed triplets from the pair graph
+triplets_df = find_triplets(pairs_df)
 triplets_df.to_parquet('data/manifests/hawaii_triplets_strict.parquet', index=False)
 
 print(f'{len(pairs_df)} pairs, {len(triplets_df)} triplets')
@@ -124,12 +125,11 @@ print(f'{len(pairs_df)} pairs, {len(triplets_df)} triplets')
 ```
 
 **Outputs**:
-- `data/manifests/hawaii_pairs.parquet` — columns: `id_ref`, `id_sec`, `datetime_ref`, `datetime_sec`, `dt_days`, `dinc_deg`, `orbit_state`, `look_direction`, `incidence_ref`, `incidence_sec`, `q_score`, `aoi`, `bperp_m`
+- `data/manifests/hawaii_pairs.parquet` — columns: `id_ref`, `id_sec`, `datetime_ref`, `datetime_sec`, `dt_days`, `dinc_deg`, `orbit_state`, `look_direction`, `incidence_ref`, `incidence_sec`, `orbital_plane_ref`, `orbital_plane_sec`, `q_score`, `aoi`
 - `data/manifests/hawaii_triplets_strict.parquet` — columns: `id_a`, `id_b`, `id_c`
 
-**Current status**: DONE — 8,834 pairs, 24,171 triplets (full manifest at dt_max=60).
-For training, only pairs with dt ≤ 7 days are used: 373 pairs, ~800 triplets.
-All 224 already-processed pairs satisfy dt ≤ 7 days (no reprocessing needed).
+**Current status**: DONE — 8,834 pairs, 24,171 triplets (built with `dt_max_days=365, dinc_max_deg=5`).
+Preprocessing (Step 3) applies a tighter `--dt_max 7` filter → 224 pairs actually processed.
 
 ---
 
@@ -432,72 +432,33 @@ Three YAML configs control all behaviour:
 - `configs/model/film_unet.yaml` — architecture (features, embed_dim, metadata_dim)
 - `configs/train/contest.yaml` — learning rate, epochs, batch size, loss weights
 
-
-# This is how to run the training (foreground in the terminal)
 ```bash
-export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH
-conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output \
-env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement \
-LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib \
-python experiments/enhanced/train_film_unet.py \
-  --data_config configs/data/capella_aoi_selection.yaml \
-  --model_config configs/model/film_unet.yaml \
-  --train_config configs/train/contest.yaml \
-  --run_name raw2gold_closure \
-  --triplets_manifest data/manifests/hawaii_triplets_strict.parquet
-```
-```bash
-# Fresh training run (timestamp auto-applied to all output filenames):
-py experiments/enhanced/train_film_unet.py \
-    --data_config  configs/data/capella_aoi_selection.yaml \
-    --model_config configs/model/film_unet.yaml \
-    --train_config configs/train/contest.yaml \
-    --run_name     raw2gold
-
-# With closure loss (requires triplets manifest):
-py experiments/enhanced/train_film_unet.py \
-    --data_config       configs/data/capella_aoi_selection.yaml \
-    --model_config      configs/model/film_unet.yaml \
-    --train_config      configs/train/contest.yaml \
-    --run_name          raw2gold_closure \
-    --triplets_manifest data/manifests/hawaii_triplets_strict.parquet
-```
-# To run run SNAPHU on FiLMUNet
-
-```bash
-TASK_NAME="unwrap_film_unet" && DATE=$(date +%Y%m%d_%H%M%S) && LOG_FILE="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python -u scripts/unwrap_snaphu.py --pairs_dir data/processed/pairs --input_ifg ifg_film_unet.tif --output_name unw_phase_film_unet.tif --workers 4 | tee "$LOG_FILE"
+# Standard training run with closure loss (foreground, timestamped log):
+TASK_NAME="train_film_unet" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python experiments/enhanced/train_film_unet.py --data_config configs/data/capella_aoi_selection.yaml --model_config configs/model/film_unet.yaml --train_config configs/train/contest.yaml --run_name raw2gold_closure --triplets_manifest data/manifests/hawaii_triplets_strict.parquet | tee "$LOG"
 ```
 
-# to compute the metrics
 ```bash
-
-conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu
-     --no-capture-output \
-       env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement \
-           LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib \
-       python eval/compute_metrics.py \
-         --checkpoint
-     experiments/enhanced/checkpoints/film_unet/raw2gold_30ep/final.pt \
-         --pairs_dir data/processed/pairs \
-         --triplets_manifest data/manifests/hawaii_triplets_strict.parquet \
-         --out_dir experiments/enhanced/outputs \
-         --skip_snaphu_metrics \
-        #  --skip_inference \
-     > logs/eval_m5fix.log 2>&1
-```
-```bash
-MODEL_NAME="raw2gold_closure_20260321_1852_final" && DATE=$(date +%Y%m%d_%H%M%S) && LOG_FILE="logs/eval_${MODEL_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python eval/compute_metrics.py --checkpoint "experiments/enhanced/checkpoints/film_unet/raw2gold_closure_20260321_1852/${MODEL_NAME}.pt" --pairs_dir data/processed/pairs --triplets_manifest data/manifests/hawaii_triplets_strict.parquet --out_dir experiments/enhanced/outputs --force_inference | tee "$LOG_FILE"
+# Resume from an existing checkpoint:
+TASK_NAME="train_film_unet_resume" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python experiments/enhanced/train_film_unet.py --data_config configs/data/capella_aoi_selection.yaml --model_config configs/model/film_unet.yaml --train_config configs/train/contest.yaml --run_name raw2gold_closure --triplets_manifest data/manifests/hawaii_triplets_strict.parquet --resume experiments/enhanced/checkpoints/film_unet/raw2gold_closure_20260321_1852/raw2gold_closure_20260321_1852_final.pt | tee "$LOG"
 ```
 
 **All flags**:
 
-| Flag | Description |
-|------|-------------|
-| `--data_config` | Path to data YAML (required) |
-| `--model_config` | Path to model YAML (required) |
-| `--train_config` | Path to training YAML (required) |
-| `--resume` | Path to `.pt` checkpoint to resume from |
-| `--triplets_manifest` | — | Parquet of triplets; enables closure loss via TripletTileDataset |
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--data_config` | required | Path to data YAML |
+| `--model_config` | required | Path to model YAML |
+| `--train_config` | required | Path to training YAML |
+| `--run_name` | `None` | Tag for checkpoint/log filenames (timestamp appended) |
+| `--resume` | `None` | Path to `.pt` checkpoint to resume from |
+| `--triplets_manifest` | `None` | Parquet of triplets; enables closure loss via TripletTileDataset |
+| `--epochs` | `None` | Override `num_epochs` from train config |
+| `--loss_n2n` | `None` | Override `loss_weights.n2n` |
+| `--loss_unc` | `None` | Override `loss_weights.unc` |
+| `--loss_closure` | `None` | Override `loss_weights.closure` |
+| `--loss_temporal` | `None` | Override `loss_weights.temporal` |
+| `--loss_grad` | `None` | Override `loss_weights.grad` |
+| `--zero_film` | off | Disable FiLM conditioning (ablation: geometry-blind U-Net) |
 
 **Key config knobs** (edit the YAML files directly):
 
@@ -551,9 +512,8 @@ where `run_tag = {--run_name}_{YYYYMMDD_HHMM}` (timestamp auto-set at script sta
 
 Each checkpoint stores: model state dict, optimizer state, epoch number, all three config dicts, git commit hash.
 
-**Current status**: Run `raw2gold_30ep_20260319_2139` complete (30/30 epochs).
-Closure loss was inactive (bug — see Session 7). Retrain with `--triplets_manifest`
-pending after fix is applied.
+**Current status**: DONE — final checkpoint `raw2gold_closure_20260321_1852_final.pt` (50 epochs, closure loss active).
+M5 temporal residual improvement: −68.3% (1.158 → 0.367 rad). See REPRODUCIBILITY.md for full metric table.
 
 ---
 
@@ -624,9 +584,11 @@ py eval/compute_metrics.py \
 | `--stride` | 128 | Inference tile stride (pixels) |
 | `--test_frac` | 0.15 | Fraction of pairs in held-out test split |
 | `--skip_inference` | off | Skip FiLMUNet forward pass; reuse `ifg_film_unet.tif` if it exists |
+| `--force_inference` | off | Re-run FiLMUNet inference even if `ifg_film_unet.tif` already exists |
 | `--skip_snaphu_metrics` | off | Skip metrics 2/3/4 (which need `unw_phase.tif`) |
+| `--copernicus_dem_dir` | `None` | Directory with Copernicus GLO-30 tiles; enables M4 DEM NMAD |
 | `--test_only` | off | Evaluate on the last `test_frac` pairs by date only |
-| `--device` | auto | PyTorch device string (`cuda`, `cpu`, `cuda:1`, …) |
+| `--device` | `None` (auto-detect) | PyTorch device string (`cuda`, `cpu`, `cuda:1`, …) |
 
 **Outputs** in `{out_dir}/`:
 
@@ -744,13 +706,14 @@ conda run --prefix $PREFIX python scripts/download_subset.py \
 
 # ── 3. Build pair graph (DONE — 8834 pairs, 24171 triplets) ──────────────────
 conda run --prefix $PREFIX python -c "
-from insar_processing.pair_graph import build_pair_graph, enumerate_triplets
+from src.insar_processing.pair_graph import PairGraphConfig, build_pair_graph, find_triplets
 import pandas as pd
 m = pd.read_parquet('data/manifests/full_index.parquet')
 hawaii = m[m.aoi == 'AOI_000']
-pairs_df = build_pair_graph(hawaii, dt_max=365, dinc_max=5.0)
+cfg = PairGraphConfig(dt_max_days=365, dinc_max_deg=5.0)
+pairs_df = build_pair_graph(hawaii, cfg)
 pairs_df.to_parquet('data/manifests/hawaii_pairs.parquet', index=False)
-triplets_df = enumerate_triplets(pairs_df, dt_max=7, dinc_max=2.0)
+triplets_df = find_triplets(pairs_df)
 triplets_df.to_parquet('data/manifests/hawaii_triplets_strict.parquet', index=False)
 "
 
@@ -798,3 +761,273 @@ conda run --prefix $PREFIX python eval/compute_metrics.py \
     --triplets_manifest data/manifests/hawaii_triplets_strict.parquet \
     --out_dir     experiments/enhanced/outputs
 ```
+
+---
+
+## Step 10 — Multi-AOI Zero-Shot Transfer
+
+Apply the trained Hawaii checkpoint to additional AOIs without retraining.
+
+| AOI | Location | Scenes | Pairs | Triplets | Status |
+|-----|----------|--------|-------|----------|--------|
+| AOI_022 | Spain (Pyrenees) | 13 | 13 | 8 | manifests ✓ |
+| AOI_024 | W. Australia | ~100 | 2025 | 28126 | manifests ✓ |
+| AOI_004 | SF Bay Area | — | TBD | TBD | download ✓ |
+| AOI_005 | Sierra Nevada, CA | 36 | TBD | TBD | download ✓ |
+| AOI_008 | Los Angeles, CA | — | TBD | TBD | download ✓ |
+| AOI_009 | Detroit / Great Lakes | 10 | TBD | TBD | download ✓ |
+| AOI_017 | Vermont / White Mtns | 2 | TBD | TBD | download ✓ |
+| AOI_033 | Tasmania (alpine) | 15 | TBD | TBD | download ✓ |
+
+### 10a — Download raw SLCs (skip if already present)
+
+```bash
+# AOI_004 (SF Bay)
+TASK_NAME="download_aoi004" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/download_subset.py --manifest data/manifests/full_index.parquet --aoi_filter AOI_004 --out_dir data/raw/ --n_workers 6 | tee "$LOG"
+```
+
+```bash
+# AOI_005 (Sierra Nevada)
+TASK_NAME="download_aoi005" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/download_subset.py --manifest data/manifests/full_index.parquet --aoi_filter AOI_005 --out_dir data/raw/ --n_workers 6 | tee "$LOG"
+```
+
+```bash
+# AOI_008 (Los Angeles)
+TASK_NAME="download_aoi008" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/download_subset.py --manifest data/manifests/full_index.parquet --aoi_filter AOI_008 --out_dir data/raw/ --n_workers 6 | tee "$LOG"
+```
+
+```bash
+# AOI_009 (Detroit / Great Lakes)
+TASK_NAME="download_aoi009" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/download_subset.py --manifest data/manifests/full_index.parquet --aoi_filter AOI_009 --out_dir data/raw/ --n_workers 6 | tee "$LOG"
+```
+
+```bash
+# AOI_017 (Vermont / White Mtns)
+TASK_NAME="download_aoi017" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/download_subset.py --manifest data/manifests/full_index.parquet --aoi_filter AOI_017 --out_dir data/raw/ --n_workers 6 | tee "$LOG"
+```
+
+```bash
+# AOI_022 (Spain — Pyrenees)
+TASK_NAME="download_aoi022" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/download_subset.py --manifest data/manifests/full_index.parquet --aoi_filter AOI_022 --out_dir data/raw/ --n_workers 6 | tee "$LOG"
+```
+
+```bash
+# AOI_024 (W. Australia)
+TASK_NAME="download_aoi024" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/download_subset.py --manifest data/manifests/full_index.parquet --aoi_filter AOI_024 --out_dir data/raw/ --n_workers 6 | tee "$LOG"
+```
+
+```bash
+# AOI_033 (Tasmania)
+TASK_NAME="download_aoi033" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/download_subset.py --manifest data/manifests/full_index.parquet --aoi_filter AOI_033 --out_dir data/raw/ --n_workers 6 | tee "$LOG"
+```
+
+### 10b — Build pair + triplet manifests (all 8 AOIs)
+
+`pair_graph.py` is a library — write the build script to a temp file first, then run it.
+
+```bash
+# Step 1: write the manifest-build script
+cat > /tmp/build_manifests_all_aois.py << 'PYEOF'
+import os, sys
+os.chdir("/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement")
+sys.path.insert(0, os.getcwd())
+import pandas as pd
+from src.insar_processing.pair_graph import PairGraphConfig, build_pair_graph, find_triplets
+
+df = pd.read_parquet("data/manifests/full_index.parquet")
+cfg = PairGraphConfig(dt_max_days=365.0, dinc_max_deg=5.0, require_same_orbit=True, require_same_look=True)
+
+aois = [("AOI_004","aoi004"),("AOI_005","aoi005"),("AOI_008","aoi008"),("AOI_009","aoi009"),
+        ("AOI_017","aoi017"),("AOI_022","aoi022"),("AOI_024","aoi024"),("AOI_033","aoi033")]
+for aoi, tag in aois:
+    sub = df[df["aoi"] == aoi]
+    print(f"\n{aoi}: {len(sub)} acquisitions")
+    edges    = build_pair_graph(sub, cfg)
+    triplets = find_triplets(edges)
+    edges.to_parquet(f"data/manifests/{tag}_pairs.parquet", index=False)
+    triplets.to_parquet(f"data/manifests/{tag}_triplets.parquet", index=False)
+    print(f"  → {len(edges)} pairs, {len(triplets)} triplets")
+PYEOF
+```
+
+```bash
+# Step 2: run it (AOI_022 + AOI_024 manifests already exist — will overwrite, which is fine)
+TASK_NAME="build_manifests_all_aois" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python /tmp/build_manifests_all_aois.py | tee "$LOG"
+```
+
+Verify: `ls data/manifests/aoi*_pairs.parquet` — should list 8 files.
+
+### 10c — Preprocess pairs
+
+```bash
+# AOI_004 (SF Bay)
+TASK_NAME="preprocess_aoi004" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/preprocess_pairs.py --pairs_manifest data/manifests/aoi004_pairs.parquet --raw_dir data/raw/AOI_004 --out_dir data/processed/AOI_004 --dt_max 365 --n_workers 4 | tee "$LOG"
+```
+
+```bash
+# AOI_005 (Sierra Nevada)
+TASK_NAME="preprocess_aoi005" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/preprocess_pairs.py --pairs_manifest data/manifests/aoi005_pairs.parquet --raw_dir data/raw/AOI_005 --out_dir data/processed/AOI_005 --dt_max 365 --n_workers 4 | tee "$LOG"
+```
+
+```bash
+# AOI_008 (Los Angeles)
+TASK_NAME="preprocess_aoi008" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/preprocess_pairs.py --pairs_manifest data/manifests/aoi008_pairs.parquet --raw_dir data/raw/AOI_008 --out_dir data/processed/AOI_008 --dt_max 365 --n_workers 4 | tee "$LOG"
+```
+
+```bash
+# AOI_009 (Detroit)
+TASK_NAME="preprocess_aoi009" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/preprocess_pairs.py --pairs_manifest data/manifests/aoi009_pairs.parquet --raw_dir data/raw/AOI_009 --out_dir data/processed/AOI_009 --dt_max 365 --n_workers 4 | tee "$LOG"
+```
+
+```bash
+# AOI_017 (Vermont)
+TASK_NAME="preprocess_aoi017" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/preprocess_pairs.py --pairs_manifest data/manifests/aoi017_pairs.parquet --raw_dir data/raw/AOI_017 --out_dir data/processed/AOI_017 --dt_max 365 --n_workers 4 | tee "$LOG"
+```
+
+```bash
+# AOI_022 (Spain)
+TASK_NAME="preprocess_aoi022" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/preprocess_pairs.py --pairs_manifest data/manifests/aoi022_pairs.parquet --raw_dir data/raw/AOI_022 --out_dir data/processed/AOI_022 --dt_max 365 --n_workers 4 | tee "$LOG"
+```
+
+```bash
+# AOI_024 (W. Australia — large: 2025 pairs, use more workers)
+TASK_NAME="preprocess_aoi024" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/preprocess_pairs.py --pairs_manifest data/manifests/aoi024_pairs.parquet --raw_dir data/raw/AOI_024 --out_dir data/processed/AOI_024 --dt_max 365 --n_workers 6 | tee "$LOG"
+```
+
+```bash
+# AOI_033 (Tasmania)
+TASK_NAME="preprocess_aoi033" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/preprocess_pairs.py --pairs_manifest data/manifests/aoi033_pairs.parquet --raw_dir data/raw/AOI_033 --out_dir data/processed/AOI_033 --dt_max 365 --n_workers 4 | tee "$LOG"
+```
+
+### 10d — Patch coreg metadata
+
+```bash
+# AOI_004
+TASK_NAME="patch_meta_aoi004" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/patch_coreg_meta.py --pairs_dir data/processed/AOI_004 --manifest data/manifests/full_index.parquet | tee "$LOG"
+```
+
+```bash
+# AOI_005
+TASK_NAME="patch_meta_aoi005" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/patch_coreg_meta.py --pairs_dir data/processed/AOI_005 --manifest data/manifests/full_index.parquet | tee "$LOG"
+```
+
+```bash
+# AOI_008
+TASK_NAME="patch_meta_aoi008" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/patch_coreg_meta.py --pairs_dir data/processed/AOI_008 --manifest data/manifests/full_index.parquet | tee "$LOG"
+```
+
+```bash
+# AOI_009
+TASK_NAME="patch_meta_aoi009" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/patch_coreg_meta.py --pairs_dir data/processed/AOI_009 --manifest data/manifests/full_index.parquet | tee "$LOG"
+```
+
+```bash
+# AOI_017
+TASK_NAME="patch_meta_aoi017" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/patch_coreg_meta.py --pairs_dir data/processed/AOI_017 --manifest data/manifests/full_index.parquet | tee "$LOG"
+```
+
+```bash
+# AOI_022
+TASK_NAME="patch_meta_aoi022" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/patch_coreg_meta.py --pairs_dir data/processed/AOI_022 --manifest data/manifests/full_index.parquet | tee "$LOG"
+```
+
+```bash
+# AOI_024
+TASK_NAME="patch_meta_aoi024" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/patch_coreg_meta.py --pairs_dir data/processed/AOI_024 --manifest data/manifests/full_index.parquet | tee "$LOG"
+```
+
+```bash
+# AOI_033
+TASK_NAME="patch_meta_aoi033" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python scripts/patch_coreg_meta.py --pairs_dir data/processed/AOI_033 --manifest data/manifests/full_index.parquet | tee "$LOG"
+```
+
+### 10e — SNAPHU unwrapping
+
+```bash
+# AOI_004
+TASK_NAME="unwrap_aoi004" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python -u scripts/unwrap_snaphu.py --pairs_dir data/processed/AOI_004 --mode DEFO --nlooks 9.0 --coh_threshold 0.1 --workers 2 | tee "$LOG"
+```
+
+```bash
+# AOI_005 (Sierra Nevada)
+TASK_NAME="unwrap_aoi005" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python -u scripts/unwrap_snaphu.py --pairs_dir data/processed/AOI_005 --mode DEFO --nlooks 9.0 --coh_threshold 0.1 --workers 3 | tee "$LOG"
+```
+
+```bash
+# AOI_008 (Los Angeles)
+TASK_NAME="unwrap_aoi008" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python -u scripts/unwrap_snaphu.py --pairs_dir data/processed/AOI_008 --mode DEFO --nlooks 9.0 --coh_threshold 0.1 --workers 3 | tee "$LOG"
+```
+
+```bash
+# AOI_009 (Detroit)
+TASK_NAME="unwrap_aoi009" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python -u scripts/unwrap_snaphu.py --pairs_dir data/processed/AOI_009 --mode DEFO --nlooks 9.0 --coh_threshold 0.1 --workers 2 | tee "$LOG"
+```
+
+```bash
+# AOI_017 (Vermont)
+TASK_NAME="unwrap_aoi017" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python -u scripts/unwrap_snaphu.py --pairs_dir data/processed/AOI_017 --mode DEFO --nlooks 9.0 --coh_threshold 0.1 --workers 2 | tee "$LOG"
+```
+
+```bash
+# AOI_022 (Spain)
+TASK_NAME="unwrap_aoi022" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python -u scripts/unwrap_snaphu.py --pairs_dir data/processed/AOI_022 --mode DEFO --nlooks 9.0 --coh_threshold 0.1 --workers 2 | tee "$LOG"
+```
+
+```bash
+# AOI_024 (W. Australia — large)
+TASK_NAME="unwrap_aoi024" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python -u scripts/unwrap_snaphu.py --pairs_dir data/processed/AOI_024 --mode DEFO --nlooks 9.0 --coh_threshold 0.1 --workers 4 | tee "$LOG"
+```
+
+```bash
+# AOI_033 (Tasmania)
+TASK_NAME="unwrap_aoi033" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python -u scripts/unwrap_snaphu.py --pairs_dir data/processed/AOI_033 --mode DEFO --nlooks 9.0 --coh_threshold 0.1 --workers 2 | tee "$LOG"
+```
+
+### 10f — Zero-shot eval with Hawaii checkpoint
+
+```bash
+# Set checkpoint once
+CKPT="experiments/enhanced/checkpoints/film_unet/raw2gold_closure_20260321_1852/raw2gold_closure_20260321_1852_final.pt"
+```
+
+```bash
+# AOI_004
+TASK_NAME="eval_zeroshot_aoi004" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python eval/compute_metrics.py --checkpoint "$CKPT" --pairs_dir data/processed/AOI_004 --triplets_manifest data/manifests/aoi004_triplets.parquet --out_dir experiments/enhanced/outputs/aoi004_eval | tee "$LOG"
+```
+
+```bash
+# AOI_005
+TASK_NAME="eval_zeroshot_aoi005" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python eval/compute_metrics.py --checkpoint "$CKPT" --pairs_dir data/processed/AOI_005 --triplets_manifest data/manifests/aoi005_triplets.parquet --out_dir experiments/enhanced/outputs/aoi005_eval | tee "$LOG"
+```
+
+```bash
+# AOI_008
+TASK_NAME="eval_zeroshot_aoi008" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python eval/compute_metrics.py --checkpoint "$CKPT" --pairs_dir data/processed/AOI_008 --triplets_manifest data/manifests/aoi008_triplets.parquet --out_dir experiments/enhanced/outputs/aoi008_eval | tee "$LOG"
+```
+
+```bash
+# AOI_009
+TASK_NAME="eval_zeroshot_aoi009" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python eval/compute_metrics.py --checkpoint "$CKPT" --pairs_dir data/processed/AOI_009 --triplets_manifest data/manifests/aoi009_triplets.parquet --out_dir experiments/enhanced/outputs/aoi009_eval | tee "$LOG"
+```
+
+```bash
+# AOI_017
+TASK_NAME="eval_zeroshot_aoi017" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python eval/compute_metrics.py --checkpoint "$CKPT" --pairs_dir data/processed/AOI_017 --triplets_manifest data/manifests/aoi017_triplets.parquet --out_dir experiments/enhanced/outputs/aoi017_eval | tee "$LOG"
+```
+
+```bash
+# AOI_022 (Spain)
+TASK_NAME="eval_zeroshot_aoi022" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python eval/compute_metrics.py --checkpoint "$CKPT" --pairs_dir data/processed/AOI_022 --triplets_manifest data/manifests/aoi022_triplets.parquet --out_dir experiments/enhanced/outputs/aoi022_eval | tee "$LOG"
+```
+
+```bash
+# AOI_024 (W. Australia)
+TASK_NAME="eval_zeroshot_aoi024" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python eval/compute_metrics.py --checkpoint "$CKPT" --pairs_dir data/processed/AOI_024 --triplets_manifest data/manifests/aoi024_triplets.parquet --out_dir experiments/enhanced/outputs/aoi024_eval | tee "$LOG"
+```
+
+```bash
+# AOI_033 (Tasmania)
+TASK_NAME="eval_zeroshot_aoi033" && DATE=$(date +%Y%m%d_%H%M%S) && LOG="logs/${TASK_NAME}_${DATE}.log" && export LD_LIBRARY_PATH=/scratch/gdemil24/hrwsi_s3client/torch-gpu/lib:$LD_LIBRARY_PATH && conda run --prefix /scratch/gdemil24/hrwsi_s3client/torch-gpu --no-capture-output env PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement python eval/compute_metrics.py --checkpoint "$CKPT" --pairs_dir data/processed/AOI_033 --triplets_manifest data/manifests/aoi033_triplets.parquet --out_dir experiments/enhanced/outputs/aoi033_eval | tee "$LOG"
+```
+
+Results land in `experiments/enhanced/outputs/{tag}_eval/metrics_*.csv` with M1–M5 columns for Goldstein vs FiLMUNet.
