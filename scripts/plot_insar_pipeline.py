@@ -186,7 +186,7 @@ def _save(fig, name: str) -> None:
 
 def fig1_coreg_insar(pair_dir: Path, meta: dict, info: pd.Series) -> None:
     print("Fig 1: Co-registration & InSAR Formation ...", flush=True)
-    ifg_raw = _read_complex(pair_dir / "ifg_raw.tif")
+    ifg_raw = _read_complex(pair_dir / "ifg_raw_complex_real_imag.tif")
     coh     = _read_raster(pair_dir / "coherence.tif")
 
     amp       = np.log1p(np.abs(ifg_raw))
@@ -239,8 +239,8 @@ def fig1_coreg_insar(pair_dir: Path, meta: dict, info: pd.Series) -> None:
 
 def fig2_phase_filtering(pair_dir: Path, meta: dict) -> None:
     print("Fig 2: Phase Filtering / Denoising ...", flush=True)
-    ifg_raw  = _read_complex(pair_dir / "ifg_raw.tif")
-    ifg_gold = _read_complex(pair_dir / "ifg_goldstein.tif")
+    ifg_raw  = _read_complex(pair_dir / "ifg_raw_complex_real_imag.tif")
+    ifg_gold = _read_complex(pair_dir / "ifg_goldstein_complex_real_imag.tif")
     ifg_film = _read_complex(pair_dir / "ifg_film_unet.tif")
     log_var  = _read_raster(pair_dir / "log_var.tif")
 
@@ -305,7 +305,7 @@ def _add_zoom_box(ax, bbox, color="red", lw=1.5):
 
 def fig3_unwrapping(pair_dir: Path, meta: dict) -> None:
     print("Fig 3: Phase Unwrapping ...", flush=True)
-    ifg_gold = _read_complex(pair_dir / "ifg_goldstein.tif")
+    ifg_gold = _read_complex(pair_dir / "ifg_goldstein_complex_real_imag.tif")
     ifg_film = _read_complex(pair_dir / "ifg_film_unet.tif")
     unw_gold = _read_raster(pair_dir / "unw_phase.tif")
     unw_film = _read_raster(pair_dir / "unw_phase_film_unet.tif")

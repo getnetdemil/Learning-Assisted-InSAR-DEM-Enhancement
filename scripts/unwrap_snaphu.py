@@ -1,9 +1,9 @@
 """
 SNAPHU phase unwrapping for processed Capella InSAR pairs.
 
-Reads ifg_goldstein.tif (2-band Re/Im) and coherence.tif from each pair
-directory and saves the unwrapped phase as unw_phase.tif (single-band
-float32 GeoTIFF).
+Reads ifg_goldstein_complex_real_imag.tif (2-band Re/Im) and coherence.tif
+from each pair directory and saves the unwrapped phase as unw_phase.tif
+(single-band float32 GeoTIFF).
 
 Unwrapping backend
 ------------------
@@ -126,7 +126,7 @@ def process_pair(
     coh_mask_threshold: float = 0.1,
     nlooks: float = 9.0,
     nproc: int = 1,
-    input_ifg: str = "ifg_goldstein.tif",
+    input_ifg: str = "ifg_goldstein_complex_real_imag.tif",
     output_name: str = "unw_phase.tif",
 ) -> Optional[Path]:
     """
@@ -157,7 +157,7 @@ def process_pair(
     nproc : int
         Number of threads for tiled SNAPHU processing.
     input_ifg : str
-        Filename of the 2-band Re/Im interferogram to unwrap (default: ifg_goldstein.tif).
+        Filename of the 2-band Re/Im interferogram to unwrap (default: ifg_goldstein_complex_real_imag.tif).
     output_name : str
         Filename for the unwrapped phase output (default: unw_phase.tif).
 
@@ -271,7 +271,7 @@ def parse_args() -> argparse.Namespace:
                    help="Equivalent number of independent looks.")
     p.add_argument("--workers", type=int, default=2,
                    help="Number of parallel worker threads.")
-    p.add_argument("--input_ifg", default="ifg_goldstein.tif",
+    p.add_argument("--input_ifg", default="ifg_goldstein_complex_real_imag.tif",
                    help="Interferogram filename to unwrap (2-band Re/Im GeoTIFF).")
     p.add_argument("--output_name", default="unw_phase.tif",
                    help="Output filename for unwrapped phase.")

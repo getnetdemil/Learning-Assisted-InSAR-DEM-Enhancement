@@ -98,7 +98,7 @@ class InSARTileDataset(Dataset):
     Loads preprocessed interferogram tiles for FiLMUNet training.
 
     Each item in the manifest points to a directory containing:
-        ifg_goldstein.tif   — complex interferogram (CInt16 / float32 Re+Im)
+        ifg_goldstein_complex_real_imag.tif   — complex interferogram (2-band float32 Re+Im)
         coherence.tif       — coherence [0,1]
         coreg_meta.json     — pair metadata (dates, B_perp, inc_angle, …)
 
@@ -133,7 +133,7 @@ class InSARTileDataset(Dataset):
             self._index_pair(pd_path)
 
     def _index_pair(self, pair_dir: Path) -> None:
-        ifg_path = pair_dir / "ifg_goldstein.tif"
+        ifg_path = pair_dir / "ifg_goldstein_complex_real_imag.tif"
         coh_path = pair_dir / "coherence.tif"
         if not ifg_path.exists() or not coh_path.exists():
             return
@@ -155,7 +155,7 @@ class InSARTileDataset(Dataset):
         window = rasterio.windows.Window(c, r, T, T)
 
         # Goldstein (pseudo-clean target)
-        with rasterio.open(pair_dir / "ifg_goldstein.tif") as src:
+        with rasterio.open(pair_dir / "ifg_goldstein_complex_real_imag.tif") as src:
             data = src.read(window=window)
             if data.shape[0] == 1:
                 cplx = data[0].astype(np.complex64)
@@ -164,7 +164,7 @@ class InSARTileDataset(Dataset):
                 re_gold, im_gold = data[0].astype(np.float32), data[1].astype(np.float32)
 
         # Raw (noisy input) — fallback to Goldstein if missing
-        raw_path = pair_dir / "ifg_raw.tif"
+        raw_path = pair_dir / "ifg_raw_complex_real_imag.tif"
         if raw_path.exists():
             with rasterio.open(raw_path) as src:
                 data = src.read(window=window)
@@ -337,7 +337,7 @@ class TripletTileDataset(Dataset):
                 continue
             try:
                 import rasterio
-                with rasterio.open(dir_ij / "ifg_goldstein.tif") as src:
+                with rasterio.open(dir_ij / "ifg_goldstein_complex_real_imag.tif") as src:
                     H, W = src.height, src.width
             except Exception:
                 continue
@@ -391,7 +391,7 @@ class TripletTileDataset(Dataset):
         T = self.tile_size
         window = rasterio.windows.Window(c, r, T, T)
         try:
-            with rasterio.open(pair_dir / "ifg_goldstein.tif") as src:
+            with rasterio.open(pair_dir / "ifg_goldstein_complex_real_imag.tif") as src:
                 data = src.read(window=window)
             if data.shape[0] == 1:
                 cplx = data[0].astype(np.complex64)
@@ -402,7 +402,7 @@ class TripletTileDataset(Dataset):
             re_gold = np.nan_to_num(re_gold, nan=0.0)
             im_gold = np.nan_to_num(im_gold, nan=0.0)
 
-            raw_path = pair_dir / "ifg_raw.tif"
+            raw_path = pair_dir / "ifg_raw_complex_real_imag.tif"
             if raw_path.exists():
                 with rasterio.open(raw_path) as src:
                     raw = src.read(window=window)
@@ -436,10 +436,10 @@ class TripletTileDataset(Dataset):
 # ─── data loading helpers ─────────────────────────────────────────────────────
 
 def discover_pair_dirs(pairs_dir: Path) -> List[Path]:
-    """Return all subdirectories of pairs_dir that contain ifg_goldstein.tif."""
+    """Return all subdirectories of pairs_dir that contain ifg_goldstein_complex_real_imag.tif."""
     return sorted(
         p for p in pairs_dir.iterdir()
-        if p.is_dir() and (p / "ifg_goldstein.tif").exists()
+        if p.is_dir() and (p / "ifg_goldstein_complex_real_imag.tif").exists()
     )
 
 

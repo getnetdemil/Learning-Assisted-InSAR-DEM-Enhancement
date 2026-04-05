@@ -105,10 +105,10 @@ def _pair_date(pair_dir: Path) -> str:
 
 
 def _discover_pairs(pairs_dir: Path) -> list[Path]:
-    """Return sorted pair dirs that contain ifg_goldstein.tif."""
+    """Return sorted pair dirs that contain ifg_goldstein_complex_real_imag.tif."""
     return sorted(
         p for p in pairs_dir.iterdir()
-        if p.is_dir() and (p / "ifg_goldstein.tif").exists()
+        if p.is_dir() and (p / "ifg_goldstein_complex_real_imag.tif").exists()
     )
 
 
@@ -163,8 +163,8 @@ def run_inference_on_pair(
     """
     import rasterio
 
-    raw_path = pair_dir / "ifg_raw.tif"
-    ifg_src = raw_path if raw_path.exists() else pair_dir / "ifg_goldstein.tif"
+    raw_path = pair_dir / "ifg_raw_complex_real_imag.tif"
+    ifg_src = raw_path if raw_path.exists() else pair_dir / "ifg_goldstein_complex_real_imag.tif"
     with rasterio.open(ifg_src) as src:
         re  = src.read(1).astype(np.float32)
         im  = src.read(2).astype(np.float32)
@@ -237,7 +237,7 @@ def save_inference_outputs(
     """Save ifg_film_unet.tif (2-band) and log_var.tif preserving georeferencing."""
     import rasterio
 
-    with rasterio.open(pair_dir / "ifg_goldstein.tif") as src:
+    with rasterio.open(pair_dir / "ifg_goldstein_complex_real_imag.tif") as src:
         profile = src.profile.copy()
 
     H, W = log_var.shape
@@ -261,7 +261,7 @@ def save_inference_outputs(
 def _load_phase(pair_dir: Path, method: str) -> Optional[np.ndarray]:
     """Load wrapped phase (H, W) for the given method."""
     import rasterio
-    fname = "ifg_goldstein.tif" if method == "goldstein" else "ifg_film_unet.tif"
+    fname = "ifg_goldstein_complex_real_imag.tif" if method == "goldstein" else "ifg_film_unet.tif"
     path = pair_dir / fname
     if not path.exists():
         return None
@@ -278,7 +278,7 @@ def _load_phase(pair_dir: Path, method: str) -> Optional[np.ndarray]:
 def _load_complex_mean(pair_dir: Path, method: str) -> Optional[tuple]:
     """Return (mean_Re, mean_Im) for the interferogram — used for vector-mean phase."""
     import rasterio
-    fname = "ifg_goldstein.tif" if method == "goldstein" else "ifg_film_unet.tif"
+    fname = "ifg_goldstein_complex_real_imag.tif" if method == "goldstein" else "ifg_film_unet.tif"
     path = pair_dir / fname
     if not path.exists():
         return None
@@ -658,7 +658,7 @@ def _save_phase_comparison(pair_dirs: list[Path], out_path: Path) -> None:
         axes = axes[np.newaxis, :]
 
     titles = ["Raw phase", "Goldstein", "FiLMUNet"]
-    fnames = ["ifg_raw.tif", "ifg_goldstein.tif", "ifg_film_unet.tif"]
+    fnames = ["ifg_raw_complex_real_imag.tif", "ifg_goldstein_complex_real_imag.tif", "ifg_film_unet.tif"]
 
     for row_i, pd_dir in enumerate(selected):
         for col_j, (fname, title) in enumerate(zip(fnames, titles)):
@@ -939,7 +939,7 @@ def main() -> None:
     pairs_dir = Path(args.pairs_dir)
     all_pairs = _discover_pairs(pairs_dir)
     if not all_pairs:
-        log.error("No pairs with ifg_goldstein.tif found in %s", pairs_dir)
+        log.error("No pairs with ifg_goldstein_complex_real_imag.tif found in %s", pairs_dir)
         sys.exit(1)
 
     eval_pairs = _temporal_split_test(all_pairs, args.test_frac) if args.test_only \

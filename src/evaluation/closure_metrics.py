@@ -258,7 +258,7 @@ def compute_baseline_metrics(
     for pd_dir in pair_dirs:
         meta_path = pd_dir / "coreg_meta.json"
         coh_path  = pd_dir / "coherence.tif"
-        ifg_path  = pd_dir / "ifg_goldstein.tif"
+        ifg_path  = pd_dir / "ifg_goldstein_complex_real_imag.tif"
 
         if not coh_path.exists() or not ifg_path.exists():
             log.debug("Skipping incomplete pair dir: %s", pd_dir.name)

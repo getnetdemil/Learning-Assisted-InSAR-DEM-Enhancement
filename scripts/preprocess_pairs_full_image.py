@@ -1,6 +1,39 @@
 #!/usr/bin/env python3
 """
-Capella Spotlight PFA SLC co-registration pipeline for InSAR.
+Capella Spotlight PFA SLC co-registration pipeline for InSAR — full-image version.
+
+Output directory
+----------------
+Outputs are written to data/processed/pairs_full_image/ (NOT data/processed/pairs/).
+This keeps full-image results isolated from the patch-based preprocess_pairs.py outputs.
+
+Batch usage with parquet manifest (recommended):
+    PYTHONPATH=/scratch/gdemil24/Learning-Assisted-InSAR-DEM-Enhancement \\
+    python scripts/preprocess_pairs_full_image.py \\
+        --pairs_manifest data/manifests/full_index_full_image.parquet \\
+        --raw_dir data/raw/AOI_000 \\
+        --out-dir data/processed/pairs_full_image \\
+        --batch-workers 4
+
+Single-pair usage (debugging):
+    python scripts/preprocess_pairs_full_image.py \\
+        --master-tif  data/raw/AOI_000/<id_ref>/<id_ref>.tif \\
+        --slave-tif   data/raw/AOI_000/<id_sec>/<id_sec>.tif \\
+        --master-json data/raw/AOI_000/<id_ref>/<id_ref>_extended.json \\
+        --slave-json  data/raw/AOI_000/<id_sec>/<id_sec>_extended.json \\
+        --out-dir     data/processed/pairs_full_image/<id_ref>__<id_sec>
+
+Key output files per pair directory
+------------------------------------
+    ifg_raw_complex_real_imag.tif         2-band float32 Re/Im raw interferogram
+    ifg_goldstein_complex_real_imag.tif   2-band float32 Re/Im Goldstein-filtered
+    ifg_raw.tif                           1-band float32 wrapped phase (radians)
+    ifg_goldstein.tif                     1-band float32 Goldstein wrapped phase
+    coherence.tif                         1-band float32 coherence [0, 1]
+    coreg_meta.json                       pair metadata + coregistration diagnostics
+    coreg_residuals.txt                   tie-point residual table
+
+Downstream scripts expect --pairs_dir data/processed/pairs_full_image.
 
 V5.8 notes
 ----------
@@ -41,6 +74,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import tifffile
+import rasterio
+from rasterio.errors import NotGeoreferencedWarning
+import warnings
+warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
 from matplotlib.colors import LinearSegmentedColormap
 from scipy.ndimage import gaussian_filter, map_coordinates, uniform_filter
 from scipy.signal import fftconvolve
@@ -251,21 +288,34 @@ def parse_capella_extended_json(json_path: os.PathLike) -> CapellaMeta:
         cols=int(img["columns"]),
         pixel_spacing_row=float(img["pixel_spacing_row"]),
         pixel_spacing_col=float(img["pixel_spacing_column"]),
-        row_sample_spacing=float(geom["row_sample_spacing"]),
-        col_sample_spacing=float(geom["col_sample_spacing"]),
-        scene_ref_row=float(geom["scene_reference_point_row_col"][0]),
-        scene_ref_col=float(geom["scene_reference_point_row_col"][1]),
-        scene_ref_ecef=np.asarray(geom["scene_reference_point_ecef"], dtype=np.float64),
+        # --- geometry fields: old format has full image_geometry; new format (product_version >= 2)
+        # has a reduced image_geometry block.  Provide sensible fallbacks so coregistration runs.
+        row_sample_spacing=float(geom["row_sample_spacing"]) if "row_sample_spacing" in geom
+                           else float(img["pixel_spacing_row"]),
+        col_sample_spacing=float(geom["col_sample_spacing"]) if "col_sample_spacing" in geom
+                           else float(img["pixel_spacing_column"]),
+        scene_ref_row=float(geom["scene_reference_point_row_col"][0]) if "scene_reference_point_row_col" in geom
+                      else float(img["rows"]) / 2.0,
+        scene_ref_col=float(geom["scene_reference_point_row_col"][1]) if "scene_reference_point_row_col" in geom
+                      else float(img["columns"]) / 2.0,
+        scene_ref_ecef=np.asarray(geom["scene_reference_point_ecef"], dtype=np.float64) if "scene_reference_point_ecef" in geom
+                       else np.asarray(center["target_position"], dtype=np.float64),
         center_target_ecef=np.asarray(center["target_position"], dtype=np.float64),
         incidence_angle_deg=float(center["incidence_angle"]),
         look_angle_deg=float(center["look_angle"]),
         squint_angle_deg=float(center["squint_angle"]),
-        row_direction=np.asarray(geom["row_direction"], dtype=np.float64),
-        col_direction=np.asarray(geom["col_direction"], dtype=np.float64),
-        slant_plane_normal=np.asarray(geom["slant_plane_normal"], dtype=np.float64),
-        center_of_aperture_time=float(geom["center_of_aperture"]["time"]),
-        center_of_aperture_pos=np.asarray(geom["center_of_aperture"]["antenna_reference_point"], dtype=np.float64),
-        center_of_aperture_vel=np.asarray(geom["center_of_aperture"]["velocity_antenna_reference_point"], dtype=np.float64),
+        row_direction=np.asarray(geom["row_direction"], dtype=np.float64) if "row_direction" in geom
+                      else np.zeros(3, dtype=np.float64),
+        col_direction=np.asarray(geom["col_direction"], dtype=np.float64) if "col_direction" in geom
+                      else np.zeros(3, dtype=np.float64),
+        slant_plane_normal=np.asarray(geom["slant_plane_normal"], dtype=np.float64) if "slant_plane_normal" in geom
+                           else np.zeros(3, dtype=np.float64),
+        center_of_aperture_time=float(geom["center_of_aperture"]["time"]) if "center_of_aperture" in geom
+                                 else 0.0,
+        center_of_aperture_pos=np.asarray(geom["center_of_aperture"]["antenna_reference_point"], dtype=np.float64) if "center_of_aperture" in geom
+                                else (np.asarray(sv_pos[len(sv_pos)//2], dtype=np.float64) if sv_pos else np.zeros(3, dtype=np.float64)),
+        center_of_aperture_vel=np.asarray(geom["center_of_aperture"]["velocity_antenna_reference_point"], dtype=np.float64) if "center_of_aperture" in geom
+                                else (np.asarray(sv_vel[len(sv_vel)//2], dtype=np.float64) if sv_vel else np.zeros(3, dtype=np.float64)),
         center_frequency_hz=float(radar["center_frequency"]),
         sampling_frequency_hz=float(radar["sampling_frequency"]),
         pointing=str(radar["pointing"]),
@@ -919,11 +969,14 @@ def save_qgis_products(out_dir: Path, ifg: np.ndarray, coh: np.ndarray,
     timings: Dict[str, float] = {}
 
     t0 = time.perf_counter()
-    raw_complex = np.stack(
-        [np.real(ifg).astype(np.float32), np.imag(ifg).astype(np.float32)],
-        axis=-1
-    )
-    save_tiff(out_dir / "ifg_raw_complex_real_imag.tif", raw_complex)
+    _raw_re = np.real(ifg).astype(np.float32)
+    _raw_im = np.imag(ifg).astype(np.float32)
+    _H, _W = _raw_re.shape
+    with rasterio.open(str(out_dir / "ifg_raw_complex_real_imag.tif"), "w",
+                       driver="GTiff", count=2, dtype="float32",
+                       height=_H, width=_W) as _dst:
+        _dst.write(_raw_re, 1)
+        _dst.write(_raw_im, 2)
     timings["ifg_raw_complex_tiff"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -941,11 +994,14 @@ def save_qgis_products(out_dir: Path, ifg: np.ndarray, coh: np.ndarray,
     timings["goldstein_filter"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
-    gold_complex = np.stack(
-        [np.real(ifg_gold).astype(np.float32), np.imag(ifg_gold).astype(np.float32)],
-        axis=-1
-    )
-    save_tiff(out_dir / "ifg_goldstein_complex_real_imag.tif", gold_complex)
+    _gold_re = np.real(ifg_gold).astype(np.float32)
+    _gold_im = np.imag(ifg_gold).astype(np.float32)
+    _H, _W = _gold_re.shape
+    with rasterio.open(str(out_dir / "ifg_goldstein_complex_real_imag.tif"), "w",
+                       driver="GTiff", count=2, dtype="float32",
+                       height=_H, width=_W) as _dst:
+        _dst.write(_gold_re, 1)
+        _dst.write(_gold_im, 2)
     timings["ifg_goldstein_complex_tiff"] = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -988,6 +1044,10 @@ def write_coreg_meta_json(out_dir: Path,
     rms_mean = float(np.mean(rms_vals)) if rms_vals.size else float("nan")
     q_score = float(np.clip(coh_mean * np.exp(-0.5 * (0.0 if not np.isfinite(rms_mean) else rms_mean)), 0.0, 1.0))
 
+    # Map Capella mode string → 2-letter code expected by FiLM conditioning
+    _MODE_MAP = {"spotlight": "SL", "sliding_spotlight": "SL", "stripmap": "SM", "video": "VS"}
+    mode_code = _MODE_MAP.get(str(master_meta.mode).lower(), str(master_meta.mode).upper()[:2])
+
     meta = {
         "id_ref": Path(master_meta.json_path).stem.replace("_extended", ""),
         "id_sec": Path(slave_meta.json_path).stem.replace("_extended", ""),
@@ -995,6 +1055,11 @@ def write_coreg_meta_json(out_dir: Path,
         "dinc_deg": float(dinc_deg),
         "q_score": q_score,
         "bperp_m": float(compatibility["baseline_perpendicular_m"]),
+        # FiLM conditioning fields (written directly from CapellaMeta — no patch step needed)
+        "incidence_angle_deg": (float(master_meta.incidence_angle_deg) + float(slave_meta.incidence_angle_deg)) / 2.0,
+        "mode": mode_code,
+        "look_direction": str(master_meta.pointing).upper(),
+        "snr_proxy": q_score,  # coherence-weighted quality score ∈ [0, 1]
         "row_offset_px": float(np.mean(row_vals)) if row_vals.size else float("nan"),
         "col_offset_px": float(np.mean(col_vals)) if col_vals.size else float("nan"),
         "patch_size": int(patch_win),
@@ -1493,25 +1558,30 @@ def _read_pairs_parquet_manifest(manifest_path: os.PathLike,
 
         job: Dict[str, str] = {"pair_id": pair_id}
 
-        if master_tif_col is not None and pd.notna(row_dict.get(master_tif_col)):
-            job['master_tif'] = str(row_dict[master_tif_col])
-        else:
-            job['master_tif'] = _resolve_pair_file(raw_dir, row_dict[master_id_col], 'tif', raw_index)
+        try:
+            if master_tif_col is not None and pd.notna(row_dict.get(master_tif_col)):
+                job['master_tif'] = str(row_dict[master_tif_col])
+            else:
+                job['master_tif'] = _resolve_pair_file(raw_dir, row_dict[master_id_col], 'tif', raw_index)
 
-        if slave_tif_col is not None and pd.notna(row_dict.get(slave_tif_col)):
-            job['slave_tif'] = str(row_dict[slave_tif_col])
-        else:
-            job['slave_tif'] = _resolve_pair_file(raw_dir, row_dict[slave_id_col], 'tif', raw_index)
+            if slave_tif_col is not None and pd.notna(row_dict.get(slave_tif_col)):
+                job['slave_tif'] = str(row_dict[slave_tif_col])
+            else:
+                job['slave_tif'] = _resolve_pair_file(raw_dir, row_dict[slave_id_col], 'tif', raw_index)
 
-        if master_json_col is not None and pd.notna(row_dict.get(master_json_col)):
-            job['master_json'] = str(row_dict[master_json_col])
-        else:
-            job['master_json'] = _resolve_pair_file(raw_dir, row_dict[master_id_col], 'json', raw_index)
+            if master_json_col is not None and pd.notna(row_dict.get(master_json_col)):
+                job['master_json'] = str(row_dict[master_json_col])
+            else:
+                job['master_json'] = _resolve_pair_file(raw_dir, row_dict[master_id_col], 'json', raw_index)
 
-        if slave_json_col is not None and pd.notna(row_dict.get(slave_json_col)):
-            job['slave_json'] = str(row_dict[slave_json_col])
-        else:
-            job['slave_json'] = _resolve_pair_file(raw_dir, row_dict[slave_id_col], 'json', raw_index)
+            if slave_json_col is not None and pd.notna(row_dict.get(slave_json_col)):
+                job['slave_json'] = str(row_dict[slave_json_col])
+            else:
+                job['slave_json'] = _resolve_pair_file(raw_dir, row_dict[slave_id_col], 'json', raw_index)
+        except FileNotFoundError as exc:
+            import logging as _log
+            _log.getLogger(__name__).warning("Skipping pair %s — missing file: %s", pair_id, exc)
+            continue
 
         if out_dir_col is not None and pd.notna(row_dict.get(out_dir_col)):
             job['out_dir'] = str(row_dict[out_dir_col])
@@ -1548,6 +1618,7 @@ def _read_batch_manifest(manifest_path: os.PathLike, batch_out_dir: Optional[os.
 def run_pipeline_batch(manifest_path: os.PathLike, batch_out_dir: Optional[os.PathLike] = None,
                        max_workers: int = 1, manifest_kind: str = "csv",
                        raw_dir: Optional[os.PathLike] = None, max_pairs: Optional[int] = None,
+                       max_slc_gb: Optional[float] = None,
                        **pipeline_kwargs) -> List[Dict[str, object]]:
     if manifest_kind == "parquet":
         if raw_dir is None:
@@ -1562,6 +1633,34 @@ def run_pipeline_batch(manifest_path: os.PathLike, batch_out_dir: Optional[os.Pa
     results: List[Dict[str, object]] = []
 
     def _run_one(job: Dict[str, str]) -> Dict[str, object]:
+        meta_path = Path(job["out_dir"]) / "coreg_meta.json"
+        if meta_path.exists():
+            try:
+                with open(meta_path) as _f:
+                    _meta = json.load(_f)
+                return {
+                    "pair_id": job["pair_id"],
+                    "out_dir": job["out_dir"],
+                    "status": "ok",
+                    "selected_candidate": _meta.get("selected_candidate", ""),
+                    "coherence_mean": _meta.get("coherence_mean", float("nan")),
+                    "coherence_median": _meta.get("coherence_median", float("nan")),
+                    "skipped": True,
+                }
+            except Exception:
+                pass  # unreadable meta → reprocess
+        if max_slc_gb is not None:
+            for _tif_key in ("master_tif", "slave_tif"):
+                _tif_path = Path(job[_tif_key])
+                if _tif_path.exists():
+                    _size_gb = _tif_path.stat().st_size / (1024 ** 3)
+                    if _size_gb > max_slc_gb:
+                        return {
+                            "pair_id": job["pair_id"],
+                            "out_dir": job["out_dir"],
+                            "status": "skipped",
+                            "skip_reason": f"{_tif_key} {_size_gb:.2f} GB > {max_slc_gb} GB limit",
+                        }
         try:
             diagnostics = run_pipeline(
                 master_tif=job["master_tif"],
@@ -1654,6 +1753,9 @@ def build_argparser():
     p.add_argument("--pass1-peak-ratio-threshold", type=float, default=1.08)
     p.add_argument("--pass2-peak-threshold", type=float, default=0.05)
     p.add_argument("--pass2-peak-ratio-threshold", type=float, default=1.12)
+    p.add_argument("--max-slc-gb", type=float, default=None,
+                   help="Skip pairs where either SLC file exceeds this size in GB (e.g. 4.0). "
+                        "Default: no limit.")
     return p
 
 
@@ -1674,12 +1776,14 @@ def main():
             manifest_kind=manifest_kind,
             raw_dir=args.raw_dir,
             max_pairs=args.max_pairs,
+            max_slc_gb=args.max_slc_gb,
             **pipeline_kwargs,
         )
         summary = {
             "n_pairs": len(results),
             "n_ok": int(sum(r["status"] == "ok" for r in results)),
             "n_rejected": int(sum(r["status"] == "rejected" for r in results)),
+            "n_skipped": int(sum(r["status"] == "skipped" for r in results)),
             "n_error": int(sum(r["status"] == "error" for r in results)),
             "results": results,
         }

@@ -1,7 +1,7 @@
 """
 Retroactive coregistration quality assessment from already-processed pairs.
 
-Reads existing ifg_goldstein.tif + coherence.tif for each processed pair and
+Reads existing ifg_goldstein_complex_real_imag.tif + coherence.tif for each processed pair and
 computes lightweight quality metrics without re-running coregistration.
 
 Usage
@@ -30,7 +30,7 @@ def assess_pair(pair_dir: Path) -> dict | None:
 
     Returns a dict with per-pair metrics, or None if files are missing.
     """
-    ifg_path = pair_dir / "ifg_goldstein.tif"
+    ifg_path = pair_dir / "ifg_goldstein_complex_real_imag.tif"
     coh_path = pair_dir / "coherence.tif"
     meta_path = pair_dir / "coreg_meta.json"
 
