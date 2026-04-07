@@ -152,9 +152,16 @@ def run_inference_on_pair(
     device: torch.device,
     tile_size: int = 256,
     stride: int = 128,
+    batch_size: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Tile → forward pass → stitch with Hanning overlap-add.
+
+    Parameters
+    ----------
+    batch_size : int
+        Number of tiles to stack into a single GPU forward pass.
+        Higher values use more VRAM but run faster (e.g. 16–32 for 24 GB).
 
     Returns
     -------
@@ -172,7 +179,7 @@ def run_inference_on_pair(
         coh = src.read(1).astype(np.float32)
 
     H, W = re.shape
-    meta_t = torch.from_numpy(_load_meta_normalised(pair_dir)).unsqueeze(0).float().to(device)
+    meta_vec = torch.from_numpy(_load_meta_normalised(pair_dir)).float().to(device)  # (7,)
 
     # Accumulation buffers
     out_re = np.zeros((H, W), dtype=np.float32)
@@ -190,36 +197,53 @@ def run_inference_on_pair(
     if not cols or cols[-1] + tile_size < W:
         cols.append(max(0, W - tile_size))
 
+    # Flatten all tile positions
+    positions = [(r, c) for r in rows for c in cols]
+
+    def _process_batch(batch_tiles, batch_pos):
+        """Run one batched forward pass and scatter results."""
+        x = torch.stack(batch_tiles, dim=0).to(device)          # (B, 3, T, T)
+        meta_b = meta_vec.unsqueeze(0).expand(len(batch_tiles), -1)  # (B, 7)
+        pred, lv = model(x, meta_b)                              # (B,2,T,T), (B,1,T,T)
+        p_np = pred.cpu().numpy()                                # (B, 2, T, T)
+        l_np = lv[:, 0].cpu().numpy()                           # (B, T, T)
+        for i, (r, c) in enumerate(batch_pos):
+            r2 = min(r + tile_size, H)
+            c2 = min(c + tile_size, W)
+            th, tw = r2 - r, c2 - c
+            w = win[:th, :tw]
+            out_re[r:r2, c:c2] += p_np[i, 0, :th, :tw] * w
+            out_im[r:r2, c:c2] += p_np[i, 1, :th, :tw] * w
+            out_lv[r:r2, c:c2] += l_np[i,    :th, :tw] * w
+            weight[r:r2, c:c2] += w
+
+    batch_tiles: list = []
+    batch_pos:   list = []
+
     with torch.no_grad():
-        for r in rows:
-            for c in cols:
-                r2 = min(r + tile_size, H)
-                c2 = min(c + tile_size, W)
-                th, tw = r2 - r, c2 - c
+        for r, c in positions:
+            r2 = min(r + tile_size, H)
+            c2 = min(c + tile_size, W)
+            th, tw = r2 - r, c2 - c
 
-                re_t  = re[r:r2, c:c2]
-                im_t  = im[r:r2, c:c2]
-                coh_t = coh[r:r2, c:c2]
+            re_t  = re[r:r2, c:c2]
+            im_t  = im[r:r2, c:c2]
+            coh_t = coh[r:r2, c:c2]
 
-                # Pad to tile_size if needed (edge tiles)
-                if th < tile_size or tw < tile_size:
-                    def _pad(a):
-                        return np.pad(a, ((0, tile_size - th), (0, tile_size - tw)))
-                    re_t, im_t, coh_t = _pad(re_t), _pad(im_t), _pad(coh_t)
+            if th < tile_size or tw < tile_size:
+                def _pad(a):
+                    return np.pad(a, ((0, tile_size - th), (0, tile_size - tw)))
+                re_t, im_t, coh_t = _pad(re_t), _pad(im_t), _pad(coh_t)
 
-                x = torch.from_numpy(
-                    np.stack([re_t, im_t, coh_t], axis=0)
-                ).unsqueeze(0).float().to(device)      # (1, 3, T, T)
+            batch_tiles.append(torch.from_numpy(np.stack([re_t, im_t, coh_t], axis=0)).float())
+            batch_pos.append((r, c))
 
-                pred, lv = model(x, meta_t)            # (1,2,T,T), (1,1,T,T)
-                p_np = pred[0].cpu().numpy()           # (2, T, T)
-                l_np = lv[0, 0].cpu().numpy()          # (T, T)
+            if len(batch_tiles) == batch_size:
+                _process_batch(batch_tiles, batch_pos)
+                batch_tiles, batch_pos = [], []
 
-                w = win[:th, :tw]
-                out_re[r:r2, c:c2] += p_np[0, :th, :tw] * w
-                out_im[r:r2, c:c2] += p_np[1, :th, :tw] * w
-                out_lv[r:r2, c:c2] += l_np[:th, :tw]   * w
-                weight[r:r2, c:c2] += w
+        if batch_tiles:  # flush remaining tiles
+            _process_batch(batch_tiles, batch_pos)
 
     eps = 1e-8
     out_re /= (weight + eps)
@@ -243,13 +267,13 @@ def save_inference_outputs(
     H, W = log_var.shape
 
     # 2-band interferogram
-    ifg_profile = {**profile, "count": 2, "dtype": "float32", "compress": "deflate"}
+    ifg_profile = {**profile, "count": 2, "dtype": "float32", "compress": "deflate", "BIGTIFF": "YES"}
     with rasterio.open(pair_dir / "ifg_film_unet.tif", "w", **ifg_profile) as dst:
         dst.write(denoised_re_im[:, :, 0], 1)
         dst.write(denoised_re_im[:, :, 1], 2)
 
     # 1-band log-variance
-    lv_profile = {**profile, "count": 1, "dtype": "float32", "compress": "deflate"}
+    lv_profile = {**profile, "count": 1, "dtype": "float32", "compress": "deflate", "BIGTIFF": "YES"}
     with rasterio.open(pair_dir / "log_var.tif", "w", **lv_profile) as dst:
         dst.write(log_var, 1)
 
@@ -902,8 +926,10 @@ def parse_args() -> argparse.Namespace:
                    help="Parquet file with triplet definitions.")
     p.add_argument("--out_dir", default="experiments/enhanced/outputs",
                    help="Output directory for CSV and figures.")
-    p.add_argument("--tile_size", type=int, default=256)
-    p.add_argument("--stride",    type=int, default=128)
+    p.add_argument("--tile_size",   type=int, default=256)
+    p.add_argument("--stride",      type=int, default=128)
+    p.add_argument("--batch_size",  type=int, default=16,
+                   help="Tiles per GPU forward pass (higher = more VRAM used, faster).")
     p.add_argument("--test_frac", type=float, default=0.15,
                    help="Fraction of pairs to use as the held-out test set.")
     p.add_argument("--skip_inference", action="store_true",
@@ -912,10 +938,17 @@ def parse_args() -> argparse.Namespace:
                    help="Force overwrite existing ifg_film_unet.tif (re-run inference).")
     p.add_argument("--skip_snaphu_metrics", action="store_true",
                    help="Skip metrics 2/3/4 that require unw_phase.tif.")
+    p.add_argument("--snaphu_only", action="store_true",
+                   help="Compute only M2/M3/M4 (skip M1 triplet closure and M5 temporal residual).")
     p.add_argument("--copernicus_dem_dir", default=None,
-                   help="Dir containing hawaii_dem.tif (Copernicus GLO-30) for M4.")
+                   help="Dir containing the merged Copernicus GLO-30 DEM for M4.")
+    p.add_argument("--aoi", default=None,
+                   help="AOI code (e.g. AOI000, AOI008, AOI024). Derives DEM filename: "
+                        "AOI000→hawaii_dem.tif, others→aoi008_dem.tif / aoi024_dem.tif etc.")
     p.add_argument("--test_only", action="store_true",
                    help="Evaluate on test split only (last --test_frac pairs by date).")
+    p.add_argument("--max_pairs", type=int, default=None,
+                   help="Limit evaluation to first N pairs (for quick tests).")
     p.add_argument("--device", default=None,
                    help="PyTorch device string (default: cuda if available).")
     return p.parse_args()
@@ -954,6 +987,8 @@ def main() -> None:
 
     eval_pairs = _temporal_split_test(all_pairs, args.test_frac) if args.test_only \
                  else all_pairs
+    if args.max_pairs is not None:
+        eval_pairs = eval_pairs[:args.max_pairs]
     log.info("Evaluating on %d pairs (%s)", len(eval_pairs),
              "test split" if args.test_only else "all pairs")
 
@@ -978,7 +1013,7 @@ def main() -> None:
             log.info("[%d/%d] Inference: %s", i + 1, len(eval_pairs), pd_dir.name)
             try:
                 denoised, log_var = run_inference_on_pair(
-                    model, pd_dir, device, args.tile_size, args.stride
+                    model, pd_dir, device, args.tile_size, args.stride, args.batch_size
                 )
                 save_inference_outputs(pd_dir, denoised, log_var)
                 n_infer += 1
@@ -987,18 +1022,23 @@ def main() -> None:
         log.info("Inference complete: %d new outputs written.", n_infer)
 
     # ── Metric 1: Triplet closure ───────────────────────────────────────────
-    # Use ALL processed pairs so triplets can be matched.
-    # FiLMUNet uses Goldstein as fallback for pairs without inference output.
-    gold_closure  = compute_closure_metrics(
-        all_pairs, triplets_df, "goldstein")
-    model_closure = compute_closure_metrics(
-        all_pairs, triplets_df, "film_unet", fallback_method="goldstein")
-
-    # Per-triplet error lists for histogram
-    gold_errors_list  = _collect_triplet_errors_list(
-        all_pairs, triplets_df, "goldstein")
-    model_errors_list = _collect_triplet_errors_list(
-        all_pairs, triplets_df, "film_unet", fallback_method="goldstein")
+    if not args.snaphu_only:
+        # Use ALL processed pairs so triplets can be matched.
+        # FiLMUNet uses Goldstein as fallback for pairs without inference output.
+        gold_closure  = compute_closure_metrics(
+            all_pairs, triplets_df, "goldstein")
+        model_closure = compute_closure_metrics(
+            all_pairs, triplets_df, "film_unet", fallback_method="goldstein")
+        gold_errors_list  = _collect_triplet_errors_list(
+            all_pairs, triplets_df, "goldstein")
+        model_errors_list = _collect_triplet_errors_list(
+            all_pairs, triplets_df, "film_unet", fallback_method="goldstein")
+    else:
+        _nan_closure = {"median_rad": float("nan"), "mean_rad": float("nan"), "n_triplets": 0}
+        gold_closure  = _nan_closure
+        model_closure = _nan_closure
+        gold_errors_list  = []
+        model_errors_list = []
 
     # ── Metrics 2 & 3 ──────────────────────────────────────────────────────
     # Per-pair coherence stats — separate for each method's unwrapped phase
@@ -1044,8 +1084,14 @@ def main() -> None:
     model_usable = usable_pairs_fraction(model_pair_stats, closure_threshold_rad=m_closure_thresh)
 
     # ── Metric 4: DEM NMAD ─────────────────────────────────────────────────
+    # Derive DEM filename from --aoi: AOI000→hawaii_dem.tif, else aoi024_dem.tif etc.
+    if args.aoi and args.aoi.upper() != "AOI000":
+        dem_filename = f"{args.aoi.lower()}_dem.tif"
+    else:
+        dem_filename = "hawaii_dem.tif"
+
     if args.copernicus_dem_dir and not args.skip_snaphu_metrics:
-        dem_path  = Path(args.copernicus_dem_dir) / "hawaii_dem.tif"
+        dem_path = Path(args.copernicus_dem_dir) / dem_filename
         if dem_path.exists():
             scene_idx  = _load_scene_index()
             gold_nmad  = _compute_m4_for_method(eval_pairs, "unw_phase.tif",
@@ -1055,8 +1101,8 @@ def main() -> None:
             log.info("M4 Goldstein NMAD=%.3f m  FiLMUNet NMAD=%.3f m",
                      gold_nmad, model_nmad)
         else:
-            log.warning("hawaii_dem.tif not found in %s — run download_copernicus_dem.py first.",
-                        args.copernicus_dem_dir)
+            log.warning("%s not found in %s — run download_copernicus_dem.py --merged_name %s first.",
+                        dem_filename, args.copernicus_dem_dir, dem_filename)
             gold_nmad  = float("nan")
             model_nmad = float("nan")
     else:
@@ -1064,10 +1110,14 @@ def main() -> None:
         model_nmad = float("nan")
 
     # ── Metric 5: Temporal consistency ─────────────────────────────────────
-    # Use all pairs for an overconstrained SBAS system; FiLMUNet falls back
-    # to Goldstein for pairs without model outputs.
-    gold_temporal  = compute_temporal_residual(all_pairs, "goldstein")
-    model_temporal = compute_temporal_residual(all_pairs, "film_unet")
+    if not args.snaphu_only:
+        # Use all pairs for an overconstrained SBAS system; FiLMUNet falls back
+        # to Goldstein for pairs without model outputs.
+        gold_temporal  = compute_temporal_residual(all_pairs, "goldstein")
+        model_temporal = compute_temporal_residual(all_pairs, "film_unet")
+    else:
+        gold_temporal  = float("nan")
+        model_temporal = float("nan")
 
     # ── Assemble results ────────────────────────────────────────────────────
     metrics = {

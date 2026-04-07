@@ -32,14 +32,16 @@ BUCKET      = "copernicus-dem-30m"
 REGION      = "eu-central-1"
 # Tile key pattern: Copernicus_DSM_COG_10_N{lat:02d}_00_{ew}{lon:03d}_00_DEM/
 #                   Copernicus_DSM_COG_10_N{lat:02d}_00_{ew}{lon:03d}_00_DEM.tif
-TILE_PREFIX = "Copernicus_DSM_COG_10_N{lat:02d}_00_{ew}{lon:03d}_00_DEM"
+#                   (southern hemisphere uses S prefix, e.g. S23 for lat=-23)
 
 
 def _tile_key(lat: int, lon: int) -> str:
-    """Return the S3 key for a Copernicus GLO-30 tile."""
-    ew  = "W" if lon < 0 else "E"
+    """Return the S3 key for a Copernicus GLO-30 tile (handles N/S and E/W)."""
+    ns      = "S" if lat < 0 else "N"
+    abs_lat = abs(lat)
+    ew      = "W" if lon < 0 else "E"
     abs_lon = abs(lon)
-    name = TILE_PREFIX.format(lat=lat, ew=ew, lon=abs_lon)
+    name = f"Copernicus_DSM_COG_10_{ns}{abs_lat:02d}_00_{ew}{abs_lon:03d}_00_DEM"
     return f"{name}/{name}.tif"
 
 
