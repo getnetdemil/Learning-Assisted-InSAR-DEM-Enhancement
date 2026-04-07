@@ -3,15 +3,15 @@ Learning-Assisted InSAR DEM Enhancement
 
 **IEEE GRSS 2026 Data Fusion Contest** submission.
 
-> **FiLMUNet: Geometry-Aware Pseudo-Supervised Phase Restoration with Zero-Shot Generalization for Large Temporal InSAR Stacks**
+> **FiLM-GPNet: Geometry-Aware Pseudo-Supervised Phase Restoration with Zero-Shot Generalization for Large Temporal InSAR Stacks**
 
-This repository implements **FiLMUNet**, a stack-aware, pseudo-supervised deep learning pipeline for improving Interferometric SAR (InSAR) phase quality over large, geometry-diverse Capella Space X-band SAR stacks, with downstream improvements in DEM NMAD and temporal stack consistency.
+This repository implements **FiLM-GPNet**, a stack-aware, pseudo-supervised deep learning pipeline for improving Interferometric SAR (InSAR) phase quality over large, geometry-diverse Capella Space X-band SAR stacks, with downstream improvements in DEM NMAD and temporal stack consistency.
 
 ---
 
 ## Key Results
 
-FiLMUNet is evaluated against Goldstein filtering across three AOIs, including one zero-shot transfer site. The headline result is a **68% reduction in SBAS temporal residual** on the primary Hawaii stack.
+FiLM-GPNet is evaluated against Goldstein filtering across three AOIs, including one zero-shot transfer site. The headline result is a **68% reduction in SBAS temporal residual** on the primary Hawaii stack.
 
 | Metric | Gold AOI000 | Gold AOI024 | Gold AOI008 | Film AOI000 (Δ) | Film AOI024 (Δ) | Film AOI008† (Δ) |
 |--------|:-----------:|:-----------:|:-----------:|:---------------:|:---------------:|:----------------:|
@@ -30,7 +30,7 @@ FiLMUNet is evaluated against Goldstein filtering across three AOIs, including o
 
 ## Method
 
-### FiLMUNet Architecture
+### FiLM-GPNet Architecture
 
 A **FiLM-conditioned encoder-decoder** that restores complex interferograms while conditioning on per-pair acquisition geometry. The Goldstein-filtered interferogram is used as input; per-pair geometry metadata modulates every decoder scale via Feature-wise Linear Modulation (FiLM).
 
@@ -46,7 +46,7 @@ FiLM rescaling at each scale: `h̃ = (1 + γ(c)) ⊙ h + β(c)`, where `γ, β` 
 
 ### Pseudo-Supervised Training
 
-FiLMUNet is trained **without clean reference interferograms**. Each SLC is split into two independent spectral sub-looks via FFT range-direction masking. The sub-look pair `(φ⁽¹⁾, φ⁽²⁾)` shares the deterministic interferometric phase but carries uncorrelated speckle — providing pseudo-supervision for Noise2Noise training. The combined loss is:
+FiLM-GPNet is trained **without clean reference interferograms**. Each SLC is split into two independent spectral sub-looks via FFT range-direction masking. The sub-look pair `(φ⁽¹⁾, φ⁽²⁾)` shares the deterministic interferometric phase but carries uncorrelated speckle — providing pseudo-supervision for Noise2Noise training. The combined loss is:
 
 | Component | Weight | Purpose |
 |-----------|--------|---------|
@@ -124,7 +124,7 @@ PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
     --out-dir data/processed/aoi000_pairs \
     --batch-workers 2 --min-coherence-mean 0.3
 
-# 4. Train FiLMUNet
+# 4. Train FiLM-GPNet
 PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
     experiments/enhanced/train_film_unet.py \
     --data_config  configs/data/capella_aoi_selection.yaml \
@@ -154,8 +154,8 @@ scripts/
   preprocess_pairs_full_image.py  # Coreg → interferogram → coherence → Goldstein (full image)
   unwrap_snaphu.py                # SNAPHU phase unwrapping (snaphu-py backend)
   sbas_dem.py                     # Weighted multi-baseline DEM inversion
-  plot_confidence_map.py          # 4-panel: raw / Goldstein / FiLMUNet / uncertainty
-  plot_coherence_confidence.py    # Coherence vs FiLMUNet confidence scatter plot
+  plot_confidence_map.py          # 4-panel: raw / Goldstein / FiLM-GPNet / uncertainty
+  plot_coherence_confidence.py    # Coherence vs FiLM-GPNet confidence scatter plot
   download_copernicus_dem.py      # Download Copernicus GLO-30 reference DEM tiles
 
 src/
@@ -172,10 +172,10 @@ src/
     closure_metrics.py  # All 5 contest metrics
 
 eval/
-  compute_metrics.py    # Goldstein vs FiLMUNet comparison: M1–M5 + CSV + figures
+  compute_metrics.py    # Goldstein vs FiLM-GPNet comparison: M1–M5 + CSV + figures
 
 experiments/enhanced/
-  train_film_unet.py    # Self-supervised FiLMUNet training
+  train_film_unet.py    # Self-supervised FiLM-GPNet training
   checkpoints/film_unet/
     raw2gold_closure_20260321_1852/   # Hawaii checkpoint (SHA-256 in REPRODUCIBILITY.md)
     aoi024_finetune_closure_20260406_1503/  # AOI024 + zero-shot AOI008 checkpoint

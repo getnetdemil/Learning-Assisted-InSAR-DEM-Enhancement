@@ -1,7 +1,7 @@
 # Reproducibility Guide
 
 IEEE GRSS 2026 Data Fusion Contest — Learning-Assisted InSAR DEM Enhancement
-**Method:** FiLMUNet — Self-Supervised InSAR Phase Denoising via Geometry-Conditioned Noise2Noise
+**Method:** FiLM-GPNet — Self-Supervised InSAR Phase Denoising via Geometry-Conditioned Noise2Noise
 
 All results are reproducible from the public Capella Space S3 bucket (no authentication required).
 
@@ -173,7 +173,7 @@ PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
     --input_ifg ifg_goldstein_complex_real_imag.tif
 ```
 
-### Step 6 — Train FiLMUNet
+### Step 6 — Train FiLM-GPNet
 ```bash
 PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
     experiments/enhanced/train_film_unet.py \
@@ -184,7 +184,7 @@ PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
     --run_name hawaii_full_image
 ```
 
-### Step 7 — Evaluate (M1 + M5; then separately M2/M3/M4 after SNAPHU on FiLMUNet output)
+### Step 7 — Evaluate (M1 + M5; then separately M2/M3/M4 after SNAPHU on FiLM-GPNet output)
 ```bash
 # Step 7a: Run inference + M1 / M5
 PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
@@ -195,7 +195,7 @@ PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
     --out_dir experiments/enhanced/outputs/hawaii_full_image \
     --stride 256 --batch_size 64 --force_inference --skip_snaphu_metrics
 
-# Step 7b: Unwrap FiLMUNet output
+# Step 7b: Unwrap FiLM-GPNet output
 PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
     scripts/unwrap_snaphu.py \
     --pairs_dir data/processed/pairs_full_image \
@@ -241,7 +241,7 @@ PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
     --interp lanczos --remap-tile 4096 --coherence-backend scipy \
     --skip-pass2 --max-slc-gb 4.0
 
-# Train FiLMUNet on AOI_024
+# Train FiLM-GPNet on AOI_024
 PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
     experiments/enhanced/train_film_unet.py \
     --data_config configs/data/capella_aoi024_full_image.yaml \
@@ -308,7 +308,7 @@ Eval log (primary / Hawaii): `logs/eval_raw2gold_closure_20260321_1852_final_202
 
 ### AOI_000 — Hawaii (Primary)
 
-| Metric | Goldstein | FiLMUNet | Δ |
+| Metric | Goldstein | FiLM-GPNet | Δ |
 |--------|-----------|----------|---|
 | M1 Triplet Closure (rad) ↓ | 1.018 | 0.915 | −10.1% |
 | M2 Unwrap Success Rate ↑ | 0.256 | 0.258 | +0.2 pp |
@@ -318,7 +318,7 @@ Eval log (primary / Hawaii): `logs/eval_raw2gold_closure_20260321_1852_final_202
 
 ### AOI_024 — Western Australia (Additional Evaluation)
 
-| Metric | Goldstein | FiLMUNet | Δ |
+| Metric | Goldstein | FiLM-GPNet | Δ |
 |--------|-----------|----------|---|
 | M1 Triplet Closure (rad) ↓ | 0.536 | **0.468** | **−6%** |
 | M2 Unwrap Success Rate ↑ | 0.531 | **0.608** | +7 pp |
@@ -327,7 +327,7 @@ Eval log (primary / Hawaii): `logs/eval_raw2gold_closure_20260321_1852_final_202
 
 ### AOI_008 — Los Angeles (Zero-Shot Transfer)
 
-| Metric | Goldstein | FiLMUNet | Δ |
+| Metric | Goldstein | FiLM-GPNet | Δ |
 |--------|-----------|----------|---|
 | M1 Triplet Closure (rad) ↓ | 0.769 | 0.771 | +0% |
 | M2 Unwrap Success Rate ↑ | 0.256 | 0.248 | −0.2 pp |
@@ -354,4 +354,4 @@ All metrics are implemented in `eval/compute_metrics.py`.
 | M4 | DEM NMAD | `1.4826 × median(|e − median(e)|)` vs Copernicus GLO-30 | ↓ ≥ 15% |
 | M5 | Temporal consistency | `‖Aẋ − φ̂‖₂` (unweighted SBAS residual over full stack) | ↓ ≥ 20% |
 
-`wrap(·)` wraps to `[−π, π)`. `A` is the SBAS design matrix; `ẋ` is the WLS solution weighted by FiLMUNet confidence `exp(−σ̂)`.
+`wrap(·)` wraps to `[−π, π)`. `A` is the SBAS design matrix; `ẋ` is the WLS solution weighted by FiLM-GPNet confidence `exp(−σ̂)`.
