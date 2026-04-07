@@ -1,5 +1,4 @@
 Claude.md
-project_update.md
 
 # datasets and large binary outputs
 data/
@@ -38,3 +37,27 @@ build/
 .vscode/
 *.swp
 *~
+.pdf
+.aux
+.bbl
+.log
+.pdf
+.blg
+.fls
+.synctex.gz
+.toc
+.lot
+.lof
+.out
+.brf
+Study_tutorial.md
+project_update.md
+Claude.md
+how_to_run.md
+Data_description.md
+Latex_Paper_Temporal_SAR_Change/*.aux
+Latex_Paper_Temporal_SAR_Change/*.bbl
+Latex_Paper_Temporal_SAR_Change/*.log
+Latex_Paper_Temporal_SAR_Change/*.pdf
+Latex_Paper_Temporal_SAR_Change/*.blg
+Latex_Paper_Temporal_SAR_Change/*.fls

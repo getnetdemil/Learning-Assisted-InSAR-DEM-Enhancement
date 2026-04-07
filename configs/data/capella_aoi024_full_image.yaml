@@ -1,0 +1,21 @@
+# Data config for FiLMUNet training — AOI024 (W. Australia) full-image pairs
+# Images are ~11K×108K px; stride=1024 keeps tile count manageable (~53K total).
+
+pairs_dir: data/processed/AOI024_pairs_full_image/
+
+pairs_manifest: data/manifests/AOI024_full_index_full_image.parquet
+triplets_manifest: data/manifests/AOI024_full_index_triplets_full_image.parquet
+
+aoi_train: [AOI_024]
+aoi_val:   [AOI_024]
+aoi_test:  [AOI_024]
+temporal_split:
+  train_frac: 0.70
+  val_frac:   0.15
+
+# Full-image tile settings — stride=1024 avoids 3M+ tile enumeration
+tile_size: 256
+stride: 1024
+min_coherence: 0.15
+
+in_channels: 3

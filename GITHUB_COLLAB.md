@@ -9,6 +9,7 @@ GitHub before, start at Section 1 and follow every step in order. After that, us
 
 ## Table of Contents
 
+0. [Your Everyday Workflow — A Full Walkthrough](#0-your-everyday-workflow--a-full-walkthrough)
 1. [One-Time Setup — Getting In Sync](#1-one-time-setup--getting-in-sync)
 2. [Branch Management — The Daily Rhythm](#2-branch-management--the-daily-rhythm)
 3. [Issues — The Single Source of Truth](#3-issues--the-single-source-of-truth)
@@ -16,6 +17,375 @@ GitHub before, start at Section 1 and follow every step in order. After that, us
 5. [Resolving Merge Conflicts — Step by Step](#5-resolving-merge-conflicts--step-by-step)
 6. [GitHub Project Board — Visual Progress Tracking](#6-github-project-board--visual-progress-tracking)
 7. [Notifications & Async Communication](#7-notifications--async-communication)
+
+---
+
+## 0. Your Everyday Workflow — A Full Walkthrough
+
+> Read this section **before Section 1**. It shows you the complete picture of a real workday
+> so that the detailed steps in Sections 1–7 have context. Come back to this as a cheat-sheet
+> after your first week.
+
+This is what a normal working day looks like for both of you, from the moment you open your
+laptop to the moment you push your work.
+
+---
+
+### The Big Picture (read this once)
+
+```
+Every piece of work follows this loop — no exceptions:
+
+  GitHub Issue          your feature branch          Pull Request
+  (the task card)  →   (isolated workspace)   →   (review + merge)
+       ↓                       ↓                         ↓
+  "I'm working        "I write and test         "Other person checks,
+   on #12"             my code here"             approves, and merges"
+```
+
+The three golden rules that make this work:
+1. **Never commit directly to `main` or `dev`** — always use a feature branch.
+2. **Every task has a GitHub Issue** — if it's not in an Issue, it doesn't exist.
+3. **Never merge your own PR** — the other person always clicks the merge button.
+
+---
+
+### Scenario A — Starting a Brand New Task
+
+Use this when you are beginning work on something that doesn't have a branch yet.
+Step through this in order, every time.
+
+---
+
+#### A1. Check what needs doing (2 min)
+
+Open the GitHub repo → **Projects** → **Contest Pipeline** board.
+
+Look at the `Backlog` column. Find the highest-priority card. If it has no assignee,
+assign yourself (right sidebar of the Issue → **Assignees → yourself**).
+
+If there is no Issue yet for what you want to do:
+```
+Issues → New issue → Task template
+Fill: title, goal, acceptance criteria, label, milestone, project
+```
+Assign it to yourself. Drag it to `In Progress` on the board.
+
+Note the Issue number — you will use it in your commit messages.
+
+---
+
+#### A2. Open your terminal and go to the repo (1 min)
+
+```bash
+cd /scratch/$USER/Learning-Assisted-InSAR-DEM-Enhancement
+```
+
+Check you have no leftover unfinished work from yesterday:
+
+```bash
+git status
+# Expected: "nothing to commit, working tree clean"
+# If it shows modified files: either commit them or stash them (see A2a below)
+```
+
+> **If you have leftover uncommitted changes (A2a):**
+> ```bash
+> git stash           # temporarily shelves your changes
+> # ... do today's setup steps ...
+> git stash pop       # brings them back later
+> ```
+
+---
+
+#### A3. Get the latest code (1 min)
+
+```bash
+git checkout dev
+git pull origin dev
+```
+
+This ensures your starting point includes everything the other person merged since you
+last worked. **Never skip this step** — skipping it causes conflicts later.
+
+Expected output:
+```
+Switched to branch 'dev'
+Already up to date.
+   -- or --
+Updating a1b2c3..d4e5f6
+Fast-forward
+ src/models/film_unet.py | 120 ++++++
+```
+
+---
+
+#### A4. Create your feature branch (30 sec)
+
+```bash
+git checkout -b feature/film-unet
+```
+
+Replace `film-unet` with something that matches your Issue. Examples:
+```bash
+git checkout -b feature/physics-losses     # for Issue: "Add N2N physics losses"
+git checkout -b fix/sublook-shape-mismatch # for a bug fix
+git checkout -b experiment/lr-ablation     # for a quick experiment
+```
+
+Verify you are on the right branch:
+```bash
+git branch
+# * feature/film-unet    ← the * shows your current branch
+#   dev
+#   main
+```
+
+---
+
+#### A5. Do your actual work
+
+Write code. The only rule: **make small commits as you go**, not one giant commit at the end.
+
+After every logical chunk of work (a working function, a passing test, a completed class):
+
+```bash
+git status                          # see what changed
+git add src/models/film_unet.py     # stage the specific file(s)
+git commit -m "feat(film_unet): add encoder with FiLM blocks"
+```
+
+**Commit message format:** `type(scope): what you did — refs #12`
+
+| If you... | Use type |
+|-----------|----------|
+| Added new functionality | `feat` |
+| Fixed a bug | `fix` |
+| Changed data/manifests | `data` |
+| Updated evaluation code | `eval` |
+| Ran an experiment | `experiment` |
+| Wrote documentation | `docs` |
+| Restructured code (no behavior change) | `refactor` |
+
+Always add `— refs #12` (or `closes #12` when the work is complete) so the commit appears
+in the Issue timeline on GitHub.
+
+---
+
+#### A6. Push your branch to GitHub (30 sec)
+
+Do this at least once a day, even if not finished. It backs up your work and lets the
+other person see what you're doing.
+
+```bash
+git push -u origin feature/film-unet
+```
+
+After the first push, subsequent pushes are just:
+```bash
+git push
+```
+
+You can now see your branch on GitHub:
+```
+Repository → Code → branch dropdown (top left, shows "main") → your branch name
+```
+
+---
+
+#### A7. When the task is done — open a Pull Request
+
+```bash
+git push    # make sure latest changes are on GitHub
+```
+
+Go to GitHub. You will see a yellow banner:
+```
+feature/film-unet had recent pushes — Compare & pull request
+```
+
+Click **Compare & pull request**. Then:
+
+1. **Check base = `dev`** (not `main`) — change it if wrong.
+2. **Fill the description** — the template auto-populates, fill every field.
+3. **Write** `Closes #12` in the description — this auto-closes the Issue on merge.
+4. **Reviewers** → select the other person (Getnet or Farhan).
+5. **Labels** → match the Issue labels.
+6. Click **Create pull request**.
+
+The other person gets an email + web notification. They review and merge it.
+You do not click the merge button — they do.
+
+---
+
+#### A8. After your PR is merged
+
+GitHub sends you a notification. Then:
+
+```bash
+git checkout dev
+git pull origin dev              # bring in the merged work
+git branch -d feature/film-unet  # delete the local branch — it's done
+```
+
+On GitHub, click **Delete branch** on the merged PR page (if it wasn't auto-deleted).
+
+The Issue auto-closes. The Project Board card moves to `Done`.
+
+---
+
+### Scenario B — Resuming Work Mid-Task (you already have a branch)
+
+Use this every morning when you're continuing work from the day before.
+
+```bash
+# Step 1 — go to the repo
+cd /scratch/$USER/Learning-Assisted-InSAR-DEM-Enhancement
+
+# Step 2 — check your current state
+git status
+# Expect: "On branch feature/film-unet, nothing to commit" or some modified files
+
+# Step 3 — pull in anything new from dev (in case the other person merged something)
+git fetch origin
+git rebase origin/dev
+# If this says "Current branch feature/film-unet is up to date" — great, continue working
+# If it starts a rebase (other person merged to dev) — it will fast-forward cleanly OR
+# pause at a conflict (go to Section 5 to resolve)
+
+# Step 4 — continue your work, commit as you go
+# ... write code ...
+git add <file>
+git commit -m "feat(film_unet): add decoder with skip connections — refs #12"
+
+# Step 5 — push at end of session
+git push
+```
+
+> **Why `git fetch` + `git rebase` instead of `git pull`?**
+> `git pull` on a feature branch does a merge, creating ugly "Merge branch 'dev' into
+> feature/film-unet" commits. `rebase` instead replays your commits on top of the latest
+> dev, keeping history linear. Make this your habit.
+
+---
+
+### Scenario C — Reviewing Someone Else's PR
+
+The other person opened a PR and requested your review. You got an email.
+
+```bash
+# Step 1 — fetch their branch
+git fetch origin
+git checkout feature/physics-losses    # switch to their branch to run it locally
+
+# Step 2 — test it locally
+conda run --prefix /scratch/$USER/hrwsi_s3client/torch-gpu \
+    python -c "from src.losses.physics_losses import noise2noise_loss; print('import OK')"
+# Run whatever test command they put in the PR description
+
+# Step 3 — go back to GitHub to leave your review
+```
+
+On GitHub → PR page → **Files changed** tab:
+- Hover over a line → click `+` → type a comment → **Start a review** (not single comment)
+- After all comments: **Finish your review** → **Approve** or **Request changes**
+
+If you approve:
+- Click the dropdown next to **Merge pull request** → **Squash and merge**
+- Confirm
+- Click **Delete branch**
+
+Done. The other person gets a notification.
+
+---
+
+### Scenario D — Your PR Has a Conflict
+
+You opened a PR and GitHub shows: `This branch has conflicts that must be resolved`.
+
+```bash
+# Step 1
+git fetch origin
+
+# Step 2 — rebase onto the updated dev
+git checkout feature/film-unet
+git rebase origin/dev
+
+# Step 3 — Git pauses and tells you which file has a conflict:
+# CONFLICT (content): Merge conflict in src/models/film_unet.py
+
+# Step 4 — open the file, find the markers:
+# <<<<<<< HEAD          ← dev's version
+# ...
+# =======
+# ...
+# >>>>>>> your commit   ← your version
+# Edit the file to the correct combined result, remove all markers
+
+# Step 5 — mark resolved and continue
+git add src/models/film_unet.py
+git rebase --continue     # repeat Steps 3-5 if more conflicts remain
+
+# Step 6 — push
+git push --force-with-lease
+```
+
+The PR updates automatically. The conflict banner disappears.
+
+---
+
+### Scenario E — Someone Pushed Directly to `main` (what NOT to do)
+
+If you ever see this in `git log`:
+
+```
+abc1234 (HEAD -> main, origin/main) added the film unet file
+```
+
+...that means someone pushed directly to `main`, bypassing review. This is the mistake
+the branch protection rules prevent. If it happens anyway:
+
+1. Check `git log main` — was this your commit or the other person's?
+2. Do NOT revert blindly. Leave a comment on the related Issue explaining what happened.
+3. Going forward: always run `git branch` to confirm you're NOT on `main` before coding.
+
+The safe habit before starting any work:
+```bash
+git branch      # check which branch you're on
+# if it shows: * main  ← STOP, do not commit here
+git checkout dev
+git checkout -b feature/your-new-branch
+```
+
+---
+
+### Daily Checklist (bookmark this)
+
+```
+MORNING (before writing any code):
+  □ git checkout dev
+  □ git pull origin dev
+  □ Check GitHub notifications — any PR review requests?
+  □ Check Project Board — what's your card for today?
+  □ git checkout -b feature/<name>   (or git checkout feature/<existing> if resuming)
+  □ git fetch origin && git rebase origin/dev   (if resuming)
+
+WHILE WORKING:
+  □ git add <file> && git commit -m "type(scope): message — refs #N"
+  □ Commit every logical chunk — not once at the end of the day
+  □ git push   (at least once during the session)
+
+END OF DAY:
+  □ git push   (make sure everything is backed up on GitHub)
+  □ If the task is done: open a PR (base=dev, reviewer=other person)
+  □ If not done: leave a comment on the Issue with today's progress
+  □ Reply to any PR review comments you received
+
+WEEKLY (Monday meeting):
+  □ Review Project Board together — drag stale cards, pick new ones
+  □ Check Milestone progress bar — on track for April 06?
+  □ Agree on who owns what for the week
+```
 
 ---
 

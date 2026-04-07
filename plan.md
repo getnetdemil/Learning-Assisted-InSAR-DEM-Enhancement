@@ -2,7 +2,7 @@
 
 **Submission deadline: April 06, 2026 (23:59 AoE)**
 **Paper deadline: April 20 (internal) / April 28 (final)**
-**Today: March 05, 2026 — 32 days to submission**
+**Today: March 18, 2026 — 19 days to submission**
 
 ---
 
@@ -215,11 +215,19 @@ S3 (Capella SAR) → STAC crawl → metadata parquet
 ## 5. Week-by-Week Implementation Plan
 
 ```
-Week 1 (Mar 05–10): Data access + STAC index + pair-graph skeleton
-Week 2 (Mar 10–18): Baseline InSAR products + SNAPHU + closure metrics
-Week 3 (Mar 18–24): DL model training (N2N + uncertainty head)
-Week 4 (Mar 24–Apr 02): Add closure + temporal losses + ablations
-Week 5 (Apr 02–06):  Final figures + paper + repo cleanup + submit
+Week 1 (Mar 05–10): Data access + STAC index + pair-graph skeleton        ✓ DONE
+Week 2 (Mar 10–18): Baseline InSAR products + model + eval pipeline        ✓ DONE
+  ↳ 221 SLCs downloaded (497 GB), 162 pairs preprocessed
+  ↳ FiLMUNet + losses built; eval/compute_metrics.py implemented
+  ↳ Goldstein baseline: M1=1.018 rad, M5=0.050 rad (M2/M3/M4 need SNAPHU)
+Week 3 (Mar 18–24): SNAPHU unwrapping + FiLMUNet training + full metrics   ← CURRENT
+  ↳ Task A DONE: patch_coreg_meta.py — 224 coreg_meta.json patched with incidence/mode/look/snr
+  ↳ Task B RUNNING: unwrap_snaphu.py (PID 2973463, started 13:15 Mar 18, ~23 hrs total)
+  ↳ Task C RUNNING: train_film_unet.py (PID 2905041, epoch 5/50 at 13:02 Mar 18, ~21 hrs total)
+  ↳ Task D PENDING: eval/compute_metrics.py — run after B+C complete (~9 AM Mar 19)
+  ↳ Fixes: unwrap_snaphu.py: ntiles threshold >= 4096, tile_overlap=max(128,5%)
+Week 4 (Mar 24–Apr 02): Ablation studies + paper figures + zero-shot AOI_008
+Week 5 (Apr 02–06):  Final paper + repo cleanup + submit
 ```
 
 ---
@@ -290,10 +298,14 @@ For each AOI, select:
 Cap total edges to compute budget. Document budget in `configs/data/pair_selection.yaml`.
 
 **Deliverables Phase 1:**
-- [ ] `data/stac_cache/` — local STAC item JSONs
-- [ ] `data/metadata/stac_index.parquet` — searchable metadata
-- [ ] `data/manifests/subset_manifest.csv` — download list with checksums
-- [ ] `src/insar_processing/pair_graph.py` — graph construction + scoring
+- [x] `data/stac_cache/` — local STAC item JSONs (791 SLC items)
+- [x] `data/manifests/full_index.parquet` — 791 SLC rows, 39 AOIs assigned
+- [x] `data/manifests/hawaii_pairs.parquet` — 8,834 pairs with B_perp
+- [x] `data/manifests/hawaii_triplets_strict.parquet` — 24,171 triplets
+- [x] `src/insar_processing/pair_graph.py` — graph construction + scoring (Q_ij)
+- [x] `src/insar_processing/geometry.py` — B_perp from state-vector interpolation
+- [x] `src/insar_processing/sublook.py` — FFT sub-look split for N2N (phase corr = 0.001)
+- [x] `src/insar_processing/filters.py` — Goldstein + adaptive Goldstein + boxcar coherence
 - [ ] `notebooks/01_pair_graph_exploration.ipynb` — visual exploration ("temporal storytelling")
 
 ---
@@ -355,11 +367,14 @@ def compute_all_contest_metrics(pair_products, triplets, stable_mask, ref_dem=No
 ```
 
 **Deliverables Phase 2:**
-- [ ] `data/processed/<aoi>/<pair_id>/` — interferogram, coherence, amplitude, unwrapped phase
-- [ ] `src/insar_processing/filters.py` — Goldstein, NL-InSAR, BM3D baselines
-- [ ] `scripts/unwrap_snaphu.py` — reproducible unwrapping script
-- [ ] `src/evaluation/closure_metrics.py` — all 5 contest metrics
-- [ ] Baseline metric numbers documented
+- [x] `data/processed/pairs/` — 162 unique pairs (ifg_raw.tif, ifg_goldstein.tif, coherence.tif, coreg_meta.json)
+- [x] `scripts/preprocess_pairs.py` — coreg → interferogram → Goldstein → coherence
+- [x] `scripts/select_triplet_completing_pairs.py` — 62 triplet-completing pairs selected + preprocessed
+- [x] `src/insar_processing/filters.py` — Goldstein + adaptive baseline (NL-InSAR/BM3D optional)
+- [x] `scripts/unwrap_snaphu.py` — SNAPHU unwrapping (RUNNING, ~23 hrs, 224 pairs × 4 workers)
+- [x] `scripts/patch_coreg_meta.py` — FiLM metadata patch (224/224 done, Mar 18)
+- [x] `eval/compute_metrics.py` — all 5 contest metrics implemented (FiLMUNet inference + tables)
+- [x] Goldstein baseline numbers: M1=1.018 rad (62 triplets), M5=0.050 rad; M2/M3/M4 need SNAPHU
 
 ---
 
@@ -458,12 +473,13 @@ python experiments/enhanced/train_film_unet.py \
 ```
 
 **Deliverables Phase 3:**
-- [ ] `src/models/film_unet.py` — FiLM-conditioned U-Net
-- [ ] `src/losses/physics_losses.py` — all 4 loss components
-- [ ] `src/insar_processing/sublook.py` — sub-look splitting for N2N
-- [ ] `experiments/enhanced/train_film_unet.py` — training script
-- [ ] Trained model checkpoint + config logged
-- [ ] First DL-vs-baseline closure metric comparison
+- [x] `src/models/film_unet.py` — FiLM-conditioned U-Net (7.96M params, smoke-tested)
+- [x] `src/losses/physics_losses.py` — all 5 loss components (N2N, NLL, closure, temporal, grad)
+- [x] `src/losses/__init__.py` — package init
+- [x] `src/insar_processing/sublook.py` — sub-look splitting for N2N
+- [x] `experiments/enhanced/train_film_unet.py` — training script with AOI-based splits
+- [ ] Trained model checkpoint + config logged  ← **NEXT** (after SNAPHU)
+- [ ] First DL-vs-baseline closure metric comparison (requires trained checkpoint)
 
 ---
 
@@ -581,33 +597,37 @@ key_packages:
 
 | Component | Current Status | Contest Need |
 |-----------|----------------|--------------|
-| Data source | Sentinel-1 (placeholder) | Capella X-band via S3/STAC |
-| ML approach | Supervised (ref DEM as target) | Self-supervised (N2N + physics losses) |
-| Model input | interferogram + coherence → DEM | complex interferogram → denoised ifg + uncertainty |
-| Metrics | RMSE, MAE, bias | closure, unwrap success, usable pairs, NMAD, temporal residual |
-| Training splits | tile-based random | AOI-based geographic splits |
-| `src/insar_processing/io.py` | Working | Extend for complex CInt16 I/O |
-| `src/insar_processing/baseline.py` | Simplified phase→height | Extend to full pipeline |
-| `src/models/unet_baseline.py` | Basic U-Net | Replace/extend with FiLM-conditioned U-Net |
-| `src/evaluation/dem_metrics.py` | RMSE/MAE/bias | Add all 5 contest metrics |
-| New: `src/insar_processing/pair_graph.py` | Does not exist | Build from scratch |
-| New: `src/models/film_unet.py` | Does not exist | Build from scratch |
-| New: `src/losses/physics_losses.py` | Does not exist | Build from scratch |
-| New: `src/evaluation/closure_metrics.py` | Does not exist | Build from scratch |
-| New: `scripts/download_subset.py` | Does not exist | Build from scratch |
+| Data source | **Done** — 221 Hawaii SLCs, 497 GB downloaded | Capella X-band via S3/STAC ✓ |
+| ML approach | **Done** — self-supervised N2N + physics losses | Self-supervised ✓ |
+| Model input | **Done** — complex ifg → denoised + uncertainty | ✓ |
+| Metrics | **Done** — all 5 in `eval/compute_metrics.py` | ✓ |
+| Training splits | **Done** — AOI-based splits in training script | ✓ |
+| `src/insar_processing/pair_graph.py` | **Done** — 8,834 pairs, 24,171 triplets | ✓ |
+| `src/insar_processing/geometry.py` | **Done** — B_perp from state-vector interpolation | ✓ |
+| `src/insar_processing/sublook.py` | **Done** — FFT sub-look N2N splits (phase corr=0.001) | ✓ |
+| `src/insar_processing/filters.py` | **Done** — Goldstein + adaptive Goldstein | ✓ |
+| `scripts/preprocess_pairs.py` | **Done** — 162 pairs preprocessed | ✓ |
+| `scripts/select_triplet_completing_pairs.py` | **Done** — fixed zero-triplet gap (+62 pairs) | ✓ |
+| `src/models/film_unet.py` | **Done** — 7.96M params, smoke-tested | ✓ |
+| `src/losses/physics_losses.py` | **Done** — N2N, NLL, closure, temporal, grad | ✓ |
+| `experiments/enhanced/train_film_unet.py` | **Done** — full training script | ✓ |
+| `eval/compute_metrics.py` | **Done** — M1=1.018 rad, M5=0.050 rad (Goldstein) | Partial (M2/M3/M4 need SNAPHU) |
+| `scripts/unwrap_snaphu.py` | **Missing** ← BUILD NEXT | Required for M2/M3/M4 |
+| Trained model checkpoint | **Missing** ← TRAIN NEXT | Required for DL comparison |
+| `REPRODUCIBILITY.md` | Does not exist | Contest requirement (due last week) |
 
-### 11.4 Immediate Next Steps (Mar 05–10)
+### 11.4 Current Next Steps (Mar 17–24)
 
-1. [ ] Install `capella-reader`, `isce3`, `pystac`, `boto3`
-2. [ ] Validate S3 access: `aws s3 ls --no-sign-request s3://capella-open-data/data/`
-3. [ ] Crawl STAC and build metadata parquet
-4. [ ] Inspect AOI/mode distribution, select 3–6 AOIs
-5. [ ] Download first small subset (1–2 AOIs, 40–80 collects)
-6. [ ] Implement `src/insar_processing/pair_graph.py` — graph + Q_ij scoring
-7. [ ] Create `notebooks/01_pair_graph_exploration.ipynb`
+1. [ ] `scripts/unwrap_snaphu.py` — SNAPHU unwrapping on 162 pairs → unlock M2/M3/M4 (#12)
+2. [ ] Launch `experiments/enhanced/train_film_unet.py` on GPU — first training run (50 epochs)
+3. [ ] Run `eval/compute_metrics.py` with FiLMUNet checkpoint → Goldstein vs FiLMUNet comparison table
+4. [ ] Ablation studies: 5 model variants (N2N-only → +closure → +temporal → +uncertainty → +FiLM)
+5. [ ] Zero-shot transfer to AOI_008 (LA) — re-run `preprocess_pairs.py` + `compute_metrics.py` (#18)
+6. [ ] `REPRODUCIBILITY.md` — STAC URL, checksums, seeds, one-command pipeline (#23)
+7. [ ] 4-page contest paper draft (#22)
 
 ---
 
-*Document Version: 2.0*
-*Last Updated: 2026-03-05*
-*Project Status: ACTIVE — Contest submission in 32 days*
+*Document Version: 2.2*
+*Last Updated: 2026-03-17*
+*Project Status: ACTIVE — All model/loss/eval code done; 162 pairs preprocessed; Goldstein baseline M1=1.018 rad, M5=0.050 rad. NEXT: SNAPHU + FiLMUNet training. 20 days to submission.*

@@ -1,160 +1,211 @@
 Learning-Assisted InSAR DEM Enhancement
 ========================================
 
-Contest submission for the **[IEEE GRSS 2026 Data Fusion Contest](https://www.grss-ieee.org/community/technical-committees/2026-ieee-grss-data-fusion-contest/)**
-— *deadline: April 06, 2026.*
+**IEEE GRSS 2026 Data Fusion Contest** submission.
 
-This repository implements a **stack-aware, self-supervised deep learning pipeline** for improving Interferometric SAR (InSAR) products over large, geometry-diverse satellite stacks, with downstream improvements in DEM quality and time-series consistency.
+> **FiLM-GPNet: Geometry-Aware Pseudo-Supervised Phase Restoration with Zero-Shot Generalization for Large Temporal InSAR Stacks**
 
-## Overview
+This repository implements **FiLM-GPNet**, a stack-aware, pseudo-supervised deep learning pipeline for improving Interferometric SAR (InSAR) phase quality over large, geometry-diverse Capella Space X-band SAR stacks, with downstream improvements in DEM NMAD and temporal stack consistency.
 
-The contest provides a Capella Space X-band SAR dataset: ~1,582 unique collects enabling 17,000+ interferometric pairs across multiple AOIs, with substantial diversity in acquisition mode, incidence angle, look direction, and orbital geometry.
+---
 
-A competitive entry must be **pair-graph-aware** and **geometry-conditioned**. Our approach:
+## Key Results
 
-1. **Pair-graph construction** — build a graph (nodes = collects, edges = candidate pairs), score each edge by a quality formula `Q_ij` using temporal baseline, incidence difference, perpendicular baseline, and SNR proxies, then select a high-value subset for processing.
-2. **Baseline InSAR products** — coregistration (ISCE3 + capella-reader), interferogram formation, coherence estimation, classical filtering (Goldstein, NL-InSAR, BM3D), SNAPHU unwrapping.
-3. **Self-supervised DL enhancement** — a FiLM-conditioned U-Net trained without any ground-truth labels using Noise2Noise (sub-look splits) + closure-consistency + temporal-consistency + fringe-preservation losses. Outputs a denoised complex interferogram and per-pixel uncertainty map.
-4. **Uncertainty-weighted inversion** — predicted uncertainty weights SNAPHU and SBAS stack inversion to improve unwrapping and time-series products.
-5. **Evaluation** — five hard, physics-linked contest metrics computed against classical baselines.
+FiLM-GPNet is evaluated against Goldstein filtering across three AOIs, including one zero-shot transfer site. The headline result is a **68% reduction in SBAS temporal residual** on the primary Hawaii stack.
 
-## Contest Metrics
+| Metric | Gold AOI000 | Gold AOI024 | Gold AOI008 | Film AOI000 (Δ) | Film AOI024 (Δ) | Film AOI008† (Δ) |
+|--------|:-----------:|:-----------:|:-----------:|:---------------:|:---------------:|:----------------:|
+| Closure (rad) ↓ | 1.018 | 0.536 | 0.769 | **0.915** (−10%) | **0.468** (−6%) | 0.771 (0%) |
+| Unwrap rate ↑ | 0.256 | 0.531 | 0.256 | **0.258** (+0.2pp) | **0.608** (+7pp) | 0.248 (−0.2pp) |
+| DEM NMAD (m) ↓ | 40.13 | 18.32 | 40.13 | **39.44** (−2%) | **12.64** (−31%) | **39.40** (−2%) |
+| Temporal res. (rad) ↓ | 1.158 | 1.069 | 1.486 | **0.367** (−68%) | **0.361** (−66%) | **1.450** (−2%) |
 
-| Metric | Definition | Target |
-|--------|-----------|--------|
-| Triplet closure error | `median|wrap(φ_ij + φ_jk − φ_ik)|` on stable pixels | ↓ ≥30% |
-| Unwrap success rate | % interferograms with ≥90% connected coverage + closure gate | ↑ ≥15 pp |
-| Percent usable pairs | % edges passing coherence + unwrap + closure gates | ↑ ≥25% |
-| DEM NMAD | `1.4826 × median(|e − median(e)|)`, stable terrain | ↓ ≥15% |
-| Temporal consistency residual | SBAS inversion residual `‖W(Ax − φ̂)‖₂` | ↓ ≥20% |
+† AOI008 is zero-shot: the AOI024-trained checkpoint is applied without retraining.
 
-## Installation
+- **AOI000** (Hawaii): cropped SLC, primary training + evaluation
+- **AOI024** (W. Australia): full-scale SLC, separate training
+- **AOI008** (Los Angeles): zero-shot transfer, no retraining
+
+---
+
+## Method
+
+### FiLM-GPNet Architecture
+
+A **FiLM-conditioned encoder-decoder** that restores complex interferograms while conditioning on per-pair acquisition geometry. The Goldstein-filtered interferogram is used as input; per-pair geometry metadata modulates every decoder scale via Feature-wise Linear Modulation (FiLM).
+
+| Property | Value |
+|----------|-------|
+| Input | `(B, 2, H, W)` — Goldstein-filtered Re, Im channels |
+| FiLM conditioning | `z = [Δt, θ_inc, θ_graze, B_perp, mode, look, SNR]` (7-dim, z-scored) |
+| Output | `(B, 3, H, W)` — Re_restored, Im_restored, log_variance |
+| Architecture | 4-scale U-Net, channels `[32, 64, 128, 256]`, 512-channel bottleneck; FiLM after each BN |
+| Parameters | 7.96 M |
+
+FiLM rescaling at each scale: `h̃ = (1 + γ(c)) ⊙ h + β(c)`, where `γ, β` are linear projections of the geometry embedding `c ∈ ℝ⁶⁴`. The residual form `(1 + γ)` initialises close to identity.
+
+### Pseudo-Supervised Training
+
+FiLM-GPNet is trained **without clean reference interferograms**. Each SLC is split into two independent spectral sub-looks via FFT range-direction masking. The sub-look pair `(φ⁽¹⁾, φ⁽²⁾)` shares the deterministic interferometric phase but carries uncorrelated speckle — providing pseudo-supervision for Noise2Noise training. The combined loss is:
+
+| Component | Weight | Purpose |
+|-----------|--------|---------|
+| Noise2Noise L1 | 1.0 | Sub-look 1 as input, sub-look 2 as noisy pseudo-target |
+| Uncertainty NLL | 0.5 | Heteroscedastic calibration of per-pixel log-variance |
+| Triplet closure consistency | 0.3 | Enforces `wrap(φ̂_ab + φ̂_bc − φ̂_ac) → 0` over triplets |
+| SBAS temporal residual | 0.2 | Penalises deviation from the WLS phase model across the stack |
+| Gradient preservation | 0.1 | Prevents over-smoothing of phase fringes |
+
+**Training:** AdamW (lr=1e-4, weight decay=1e-5), cosine annealing, batch size 8, 50 epochs on a single A100 (40 GB). Seed 42.
+
+The predicted `σ²(p)` propagates downstream as diagonal weights `W = diag(1/σ̄²_p)` in SBAS stack inversion, replacing the uniform Goldstein weighting.
+
+---
+
+## Data
+
+All data comes from the **public Capella Space AWS S3 bucket** — no credentials required.
+
+| Resource | Value |
+|----------|-------|
+| STAC collection | `https://capella-open-data.s3.us-west-2.amazonaws.com/stac/capella-open-data-ieee-data-contest/collection.json` |
+| S3 bucket | `s3://capella-open-data/data/` (region: `us-west-2`) |
+| Dataset | 791 X-band spotlight SLCs across 39 AOIs |
+
+```bash
+# Verify access (no authentication required):
+aws s3 ls --no-sign-request s3://capella-open-data/data/ | head -5
+```
+
+---
+
+## Environment
 
 ```bash
 conda create -n insar-dem python=3.10
 conda activate insar-dem
-
-# PyTorch with CUDA
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# Core dependencies
+pip install torch==2.4.0 torchvision --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
 pip install -e .
-
-# Contest-specific packages
-pip install boto3 pystac capella-reader dask geopandas
-conda install -c conda-forge isce3
+pip install boto3 pystac snaphu-py==0.4.1
 ```
 
-Verify:
-```bash
-python -c "import torch; print(torch.cuda.is_available())"
-aws s3 ls --no-sign-request s3://capella-open-data/data/
-```
+Confirmed working: Python 3.10, PyTorch 2.4.0, CUDA 12.1, rasterio 1.3.x, numpy 1.26.x.
 
-## Data Access
+> **Note:** If rasterio fails with a `GLIBCXX` error, prepend `export LD_LIBRARY_PATH=<your_env>/lib:$LD_LIBRARY_PATH` before running any script.
 
-Data is on a **public AWS S3 bucket** — no authentication required.
+---
 
-- **S3 bucket**: `s3://capella-open-data/data/` (region: `us-west-2`)
-- **STAC catalog**: `https://capella-open-data.s3.us-west-2.amazonaws.com/stac/catalog.json`
-- **Contest collection**: child link `"IEEE Data Contest 2026"` → `capella-open-data-ieee-data-contest/collection.json`
-
-The catalog is a **static STAC** (JSON files, no `/search` endpoint) — use `pystac` directly.
+## Quick Start
 
 ```bash
-# Crawl catalog, select AOIs, build local manifest, download subset
-python scripts/download_subset.py \
-    --stac_root https://capella-open-data.s3.us-west-2.amazonaws.com/stac/catalog.json \
-    --out_manifest data/manifests/subset_manifest.csv \
-    --out_dir data/raw/
-```
+export REPO=/path/to/Learning-Assisted-InSAR-DEM-Enhancement
+export ENV=/path/to/your/conda/env
+export LD_LIBRARY_PATH=$ENV/lib:$LD_LIBRARY_PATH
 
-Data format per collect: COG GeoTIFF (CInt16 complex SLC) + STAC JSON + extended JSON sidecar.
+# 1. Build full metadata index (STAC crawl — no download)
+PYTHONPATH=$REPO conda run --prefix $ENV python \
+    scripts/download_subset.py --index_only \
+    --out_manifest data/manifests/full_index.parquet
 
-## Workflows
+# 2. Build interferometric pair graph for an AOI
+PYTHONPATH=$REPO conda run --prefix $ENV python \
+    scripts/build_pairs_manifest.py \
+    --manifest data/manifests/full_index.parquet \
+    --aoi AOI_000 --no-require-same-platform \
+    --out data/manifests/aoi000_pairs.parquet \
+    --triplets data/manifests/aoi000_triplets.parquet
 
-### 1. Baseline InSAR Pipeline
+# 3. Preprocess pairs (coregistration → interferogram → coherence → Goldstein)
+PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
+    scripts/preprocess_pairs_full_image.py \
+    --pairs_manifest data/manifests/aoi000_pairs.parquet \
+    --raw_dir data/raw/AOI_000 \
+    --out-dir data/processed/aoi000_pairs \
+    --batch-workers 2 --min-coherence-mean 0.3
 
-```bash
-# Coregistration, interferogram formation, coherence, classical filtering, SNAPHU
-python scripts/preprocess_pairs.py \
-    --manifest data/manifests/subset_manifest.csv \
-    --out_dir data/processed/
-
-python scripts/unwrap_snaphu.py \
-    --processed_dir data/processed/ \
-    --coherence_threshold 0.35
-
-# Simplified phase-to-height DEM (existing scaffold)
-python experiments/baseline/run_baseline.py \
-    --config configs/experiment/baseline_sentinel1.yaml
-```
-
-### 2. Self-Supervised DL Training
-
-```bash
-python experiments/enhanced/train_film_unet.py \
-    --data_config configs/data/capella_aoi_selection.yaml \
+# 4. Train FiLM-GPNet
+PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
+    experiments/enhanced/train_film_unet.py \
+    --data_config  configs/data/capella_aoi_selection.yaml \
     --model_config configs/model/film_unet.yaml \
-    --train_config configs/train/contest.yaml
+    --train_config configs/train/contest.yaml \
+    --triplets_manifest data/manifests/aoi000_triplets.parquet
+
+# 5. Evaluate (all 5 contest metrics)
+PYTHONPATH=$REPO conda run --prefix $ENV --no-capture-output python -u \
+    eval/compute_metrics.py \
+    --checkpoint experiments/enhanced/checkpoints/film_unet/<run>/<run>_final.pt \
+    --pairs_dir   data/processed/aoi000_pairs \
+    --triplets_manifest data/manifests/aoi000_triplets.parquet \
+    --out_dir     experiments/enhanced/outputs/aoi000
 ```
 
-The model (`FiLMUNet`) takes a complex interferogram (2 channels: Re, Im) conditioned on acquisition geometry metadata, and outputs a denoised interferogram + per-pixel log-variance. Training is fully self-supervised via sub-look splits — no clean reference interferograms are required.
+For the complete step-by-step guide with all CLI flags, logging patterns, and multi-AOI examples, see [`How_2_run_full_SLC.md`](How_2_run_full_SLC.md).
 
-### 3. Evaluation
-
-```bash
-python eval/compute_metrics.py \
-    --processed_dir data/processed/ \
-    --ref_dem data/reference/ \
-    --out_dir results/
-```
-
-Produces all five contest metrics per AOI and aggregated, plus figures for the paper.
+---
 
 ## Repository Structure
 
 ```
+scripts/
+  download_subset.py              # STAC crawl → manifest; S3 parallel download
+  build_pairs_manifest.py         # Pair-graph construction with temporal/geometric filters
+  preprocess_pairs_full_image.py  # Coreg → interferogram → coherence → Goldstein (full image)
+  unwrap_snaphu.py                # SNAPHU phase unwrapping (snaphu-py backend)
+  sbas_dem.py                     # Weighted multi-baseline DEM inversion
+  plot_confidence_map.py          # 4-panel: raw / Goldstein / FiLM-GPNet / uncertainty
+  plot_coherence_confidence.py    # Coherence vs FiLM-GPNet confidence scatter plot
+  download_copernicus_dem.py      # Download Copernicus GLO-30 reference DEM tiles
+
 src/
   insar_processing/
-    io.py                  # Rasterio-based raster I/O (load_raster, save_raster, resample_raster)
-    baseline.py            # BaselineConfig + phase-to-height conversion (run_baseline)
-    dataset_preparation.py # Sliding-window tiling (TileConfig, sliding_window, prepare_dem_tiles)
-    pair_graph.py          # [to build] pair-graph construction + Q_ij edge scoring
-    geometry.py            # [to build] B_perp from ISCE3 orbit geometry
-    filters.py             # [to build] Goldstein, NL-InSAR, BM3D baselines
-    sublook.py             # [to build] sub-look splits for Noise2Noise training
+    filters.py          # Goldstein + coherence-adaptive Goldstein
+    sublook.py          # FFT sub-look splitting for Noise2Noise training
+    pair_graph.py       # Q_ij scoring, B_perp from orbit state vectors
+    geometry.py         # Perpendicular baseline geometry
   models/
-    unet_baseline.py       # Basic U-Net (in_channels=2 → out_channels=1)
-    film_unet.py           # [to build] FiLM-conditioned U-Net for contest submission
+    film_unet.py        # FiLM-conditioned U-Net (primary model)
   losses/
-    physics_losses.py      # [to build] N2N, closure, temporal, gradient losses
+    physics_losses.py   # N2N, uncertainty NLL, closure, temporal, gradient losses
   evaluation/
-    dem_metrics.py         # RMSE, MAE, bias
-    closure_metrics.py     # [to build] all 5 contest metrics
-  visualization/
-    plots.py               # DEM comparison + error histogram plots
+    closure_metrics.py  # All 5 contest metrics
 
-experiments/
-  baseline/run_baseline.py              # Phase-to-height DEM (existing scaffold)
-  enhanced/train_unet.py               # Basic U-Net training (existing scaffold)
-  enhanced/train_film_unet.py          # [to build] Contest DL training script
+eval/
+  compute_metrics.py    # Goldstein vs FiLM-GPNet comparison: M1–M5 + CSV + figures
 
-scripts/                               # [to build] Download, preprocess, unwrap
-eval/                                  # [to build] Contest metrics + figures
+experiments/enhanced/
+  train_film_unet.py    # Self-supervised FiLM-GPNet training
+  checkpoints/film_unet/
+    raw2gold_closure_20260321_1852/   # Hawaii checkpoint (SHA-256 in REPRODUCIBILITY.md)
+    aoi024_finetune_closure_20260406_1503/  # AOI024 + zero-shot AOI008 checkpoint
+
 configs/
-  data/          # Data paths, AOI selection, tiling parameters
-  experiment/    # InSAR geometry parameters
-  model/         # Model architecture hyperparameters
-  train/         # Learning rate, epochs, checkpoint directory
-notebooks/       # Exploratory analysis and pair-graph visualization
+  data/capella_aoi024_full_image.yaml   # AOI024 data config
+  model/film_unet.yaml                  # Architecture: features, embed_dim, metadata_dim=7
+  train/contest.yaml                    # lr=1e-4, epochs=50, seed=42, loss weights
+
+data/
+  manifests/            # Parquet pair/triplet manifests (SHA-256 in REPRODUCIBILITY.md)
+  raw/                  # Downloaded SLCs (not in git)
+  processed/            # Preprocessed pair directories (not in git)
+  reference/            # Copernicus GLO-30 reference DEMs (not in git)
 ```
 
-## Development Plan
-
-See [`plan.md`](plan.md) for the week-by-week implementation schedule, detailed phase descriptions, metric definitions, DL loss formulas, ablation study design, and the reproducibility checklist required for contest submission.
+---
 
 ## Reproducibility
 
-See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) (to be created) for the STAC root URL, contest collection ID, exact download manifest with checksums, fixed random seeds, and deterministic training settings — all required by the contest.
+All results are reproducible from the public Capella S3 endpoint.
+
+See [`REPRODUCIBILITY.md`](REPRODUCIBILITY.md) for:
+- STAC collection URL and S3 bucket
+- SHA-256 checksums for all manifests and model checkpoints
+- Random seeds and exact environment versions
+- Step-by-step commands to reproduce each AOI result
+
+---
+
+## Citation
+
+If you use this work, please cite the IEEE GRSS 2026 Data Fusion Contest dataset and this repository.

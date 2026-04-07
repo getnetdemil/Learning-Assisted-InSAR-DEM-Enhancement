@@ -1,0 +1,6 @@
+# Model config for FiLMUNet
+model_class: FiLMUNet
+in_channels: 3          # Re, Im, coherence
+metadata_dim: 7         # [Δt, Δθ_inc, Δθ_graze, B_perp, mode_embed, look_embed, SNR_proxy]
+features: [32, 64, 128, 256]
+embed_dim: 64

@@ -28,3 +28,14 @@ def bias(pred: np.ndarray, target: np.ndarray, mask: np.ndarray | None = None) -
     diff = pred - target
     return float(np.mean(diff))
 
+
+def nmad(pred: np.ndarray, target: np.ndarray, mask: np.ndarray | None = None) -> float:
+    """Normalised Median Absolute Deviation: 1.4826 × median(|e − median(e)|)."""
+    if mask is not None:
+        pred, target = pred[mask], target[mask]
+    e = pred.astype(np.float64) - target.astype(np.float64)
+    e = e[np.isfinite(e)]
+    if e.size == 0:
+        return float("nan")
+    return float(1.4826 * np.median(np.abs(e - np.median(e))))
+
